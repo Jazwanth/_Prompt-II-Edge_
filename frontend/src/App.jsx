@@ -59,6 +59,7 @@ function App() {
 
   const wsRef = useRef(null);
   const pointCounterRef = useRef(0);
+  const fileInputRef = useRef(null);
 
   const [code, setCode] = useState(() => {
     const autosaved = localStorage.getItem(AUTOSAVE_KEY);
@@ -147,6 +148,46 @@ function App() {
 
     setOutput(`Project "${name}" saved successfully.`);
   };
+
+  const exportIno = () => {
+    const safeName =
+      projectName.trim().replace(/[^a-zA-Z0-9_-]/g, "_") || "sketch";
+
+    const blob = new Blob([code], {
+      type: "text/plain",
+    });
+
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${safeName}.ino`;
+    a.click();
+
+    URL.revokeObjectURL(url);
+
+    setOutput(`Exported ${safeName}.ino`);
+  };
+
+  const importIno = (event) => {
+    const file = event.target.files[0];
+
+    if (!file) return;
+
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      const importedCode = reader.result;
+
+      setCode(importedCode);
+      setProjectName(file.name.replace(/\.ino$/i, ""));
+      setOutput(`Imported ${file.name}`);
+    };
+
+    reader.readAsText(file);
+
+    event.target.value = "";
+  };  
 
   const openProject = (name) => {
     if (!name) return;
@@ -399,7 +440,13 @@ function App() {
         }}
       >
         <h3>Project</h3>
-
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".ino,.cpp,.h,.txt"
+          style={{ display: "none" }}
+          onChange={importIno}
+        />
         <input
           value={projectName}
           onChange={(e) => setProjectName(e.target.value)}
@@ -413,6 +460,17 @@ function App() {
 
         <button onClick={saveProject} style={{ marginLeft: "10px" }}>
           Save Project
+        </button>
+
+        <button onClick={exportIno} style={{ marginLeft: "10px" }}>
+          Export .ino
+        </button>
+
+        <button
+          onClick={() => fileInputRef.current.click()}
+          style={{ marginLeft: "10px" }}
+        >
+          Import .ino
         </button>
 
         <select
