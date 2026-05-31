@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
 import axios from "axios";
 
@@ -41,23 +41,741 @@ void loop() {
 
 const PROJECTS_KEY = "webArduinoIDE_projects";
 const AUTOSAVE_KEY = "webArduinoIDE_autosave_tabs";
+const DASHBOARD_CONFIG_KEY = "webArduinoIDE_dashboard_config";
+const MAIN_FILE = "tempSketch.ino";
+const AUTOSAVE_DELAY_MS = 500;
+const MAX_SERIAL_CHARS = 30000;
+const MAX_PLOT_POINTS = 80;
+const SERIAL_FLUSH_MS = 100;
+const DEFAULT_BAUD_RATE = 115200;
+const ALLOWED_FILE_EXTENSIONS = [".ino", ".cpp", ".c", ".h", ".hpp", ".txt"];
+const SERIAL_BAUD_RATES = [9600, 19200, 38400, 57600, 74880, 115200, 230400, 921600];
+
+const EDITOR_OPTIONS = {
+  automaticLayout: true,
+  minimap: { enabled: false },
+  renderWhitespace: "selection",
+  scrollBeyondLastLine: false,
+  smoothScrolling: true,
+};
+
+const PLOT_OPTIONS = {
+  responsive: true,
+  animation: false,
+  maintainAspectRatio: false,
+};
+
+const PLOT_COLORS = [
+  "#2563eb",
+  "#dc2626",
+  "#16a34a",
+  "#9333ea",
+  "#ea580c",
+  "#0891b2",
+  "#be123c",
+  "#4f46e5",
+];
+
+function createDefaultFiles() {
+  return DEFAULT_FILES.map((file) => ({ ...file }));
+}
+
+function cleanFileName(name) {
+  return String(name || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9_.-]/g, "_");
+}
+
+function getFileExtension(name) {
+  const dotIndex = name.lastIndexOf(".");
+  return dotIndex >= 0 ? name.slice(dotIndex).toLowerCase() : "";
+}
+
+function isAllowedFileName(name) {
+  return ALLOWED_FILE_EXTENSIONS.includes(getFileExtension(name));
+}
+
+function normalizeFiles(files) {
+  const sourceFiles = Array.isArray(files) ? files : createDefaultFiles();
+  const normalized = [];
+  const seenNames = new Set();
+  let mainFile = null;
+
+  sourceFiles.forEach((file) => {
+    const originalName = cleanFileName(file?.name);
+    if (!originalName || !isAllowedFileName(originalName)) return;
+
+    const content = typeof file?.content === "string" ? file.content : "";
+    const isIno = getFileExtension(originalName) === ".ino";
+    const name = isIno ? MAIN_FILE : originalName;
+
+    if (seenNames.has(name)) return;
+
+    const normalizedFile = { name, content };
+    seenNames.add(name);
+
+    if (name === MAIN_FILE) {
+      mainFile = normalizedFile;
+      return;
+    }
+
+    normalized.push(normalizedFile);
+  });
+
+  if (!mainFile) {
+    mainFile = createDefaultFiles()[0];
+  }
+
+  return [mainFile, ...normalized];
+}
+
+function readStoredFiles() {
+  try {
+    const autosaved = localStorage.getItem(AUTOSAVE_KEY);
+    const parsed = autosaved ? JSON.parse(autosaved) : createDefaultFiles();
+
+    return normalizeFiles(parsed);
+  } catch {
+    return createDefaultFiles();
+  }
+}
+
+function readStoredProjects() {
+  try {
+    const raw = localStorage.getItem(PROJECTS_KEY);
+    const projects = raw ? JSON.parse(raw) : {};
+
+    return projects && typeof projects === "object" && !Array.isArray(projects)
+      ? projects
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function readDashboardConfig() {
+  try {
+    const raw = localStorage.getItem(DASHBOARD_CONFIG_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function formatApiError(err) {
+  const data = err.response?.data;
+
+  if (data?.error) return data.error;
+  if (typeof data === "string") return data;
+
+  return JSON.stringify(data || err.message, null, 2);
+}
+
+function parseSerialMetrics(line) {
+  const trimmed = line.trim();
+  if (!trimmed) return [];
+
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+
+      return Object.entries(parsed)
+        .map(([name, value]) => ({
+          name: name.trim().replace(/\s+/g, " "),
+          value: Number(value),
+        }))
+        .filter((item) => item.name && Number.isFinite(item.value));
+    } catch {
+      // Fall through to Arduino-style key:value parsing.
+    }
+  }
+
+  const namedValues = [];
+  const pairPattern = /([a-zA-Z_][\w .-]*)\s*[:=]\s*(-?\d+(?:\.\d+)?)/g;
+  let match = pairPattern.exec(trimmed);
+
+  while (match) {
+    namedValues.push({
+      name: match[1].trim().replace(/\s+/g, " "),
+      value: Number(match[2]),
+    });
+    match = pairPattern.exec(trimmed);
+  }
+
+  if (namedValues.length > 0) {
+    return namedValues.filter((item) => Number.isFinite(item.value));
+  }
+
+  const value = Number(trimmed);
+
+  if (Number.isFinite(value)) {
+    return [{ name: "Serial Value", value }];
+  }
+
+  return [];
+}
+
+function clampPercent(value) {
+  return Math.max(0, Math.min(100, value));
+}
+
+function getMetricRange(config) {
+  const min = Number(config?.min);
+  const max = Number(config?.max);
+
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) {
+    return null;
+  }
+
+  return { min, max };
+}
+
+const CodeEditor = memo(function CodeEditor({ fileName, code, onChange }) {
+  return (
+    <Editor
+      height="500px"
+      defaultLanguage="cpp"
+      path={fileName}
+      theme="vs-dark"
+      value={code}
+      options={EDITOR_OPTIONS}
+      onChange={onChange}
+    />
+  );
+});
+
+const SerialConsole = memo(function SerialConsole({ selectedPort }) {
+  const [serialData, setSerialData] = useState("");
+  const [isSerialConnected, setIsSerialConnected] = useState(false);
+  const [baudRate, setBaudRate] = useState(DEFAULT_BAUD_RATE);
+  const [plotRows, setPlotRows] = useState([]);
+  const [latestMetrics, setLatestMetrics] = useState({});
+  const [dashboardConfig, setDashboardConfig] = useState(readDashboardConfig);
+  const [selectedMetric, setSelectedMetric] = useState("");
+
+  const pointCounterRef = useRef(0);
+  const serialBufferRef = useRef("");
+  const plotBufferRef = useRef([]);
+  const latestMetricsBufferRef = useRef({});
+  const serialLineBufferRef = useRef("");
+  const flushTimerRef = useRef(null);
+
+  const flushBufferedData = useCallback(() => {
+    flushTimerRef.current = null;
+
+    const serialChunk = serialBufferRef.current;
+    const plotChunk = plotBufferRef.current;
+    const latestChunk = latestMetricsBufferRef.current;
+
+    serialBufferRef.current = "";
+    plotBufferRef.current = [];
+    latestMetricsBufferRef.current = {};
+
+    if (serialChunk) {
+      setSerialData((prev) => (prev + serialChunk).slice(-MAX_SERIAL_CHARS));
+    }
+
+    if (plotChunk.length > 0) {
+      setPlotRows((prev) =>
+        [...prev, ...plotChunk].slice(-MAX_PLOT_POINTS)
+      );
+    }
+
+    if (Object.keys(latestChunk).length > 0) {
+      setLatestMetrics((prev) => ({
+        ...prev,
+        ...latestChunk,
+      }));
+    }
+  }, []);
+
+  const scheduleFlush = useCallback(() => {
+    if (flushTimerRef.current) return;
+    flushTimerRef.current = window.setTimeout(
+      flushBufferedData,
+      SERIAL_FLUSH_MS
+    );
+  }, [flushBufferedData]);
+
+  const queueSerialData = useCallback(
+    (message) => {
+      setIsSerialConnected(true);
+      serialBufferRef.current += message;
+
+      const combined = serialLineBufferRef.current + message;
+      const lines = combined.split(/\r?\n/);
+
+      serialLineBufferRef.current = /(?:\r?\n)$/.test(combined)
+        ? ""
+        : lines.pop() || "";
+
+      const nextPoints = [];
+
+      lines.forEach((line) => {
+        const metrics = parseSerialMetrics(line);
+        if (metrics.length === 0) return;
+
+        pointCounterRef.current += 1;
+
+        const values = {};
+        metrics.forEach((metric) => {
+          values[metric.name] = metric.value;
+          latestMetricsBufferRef.current[metric.name] = metric.value;
+        });
+
+        nextPoints.push({
+          label: pointCounterRef.current.toString(),
+          values,
+        });
+      });
+
+      if (nextPoints.length > 0) {
+        plotBufferRef.current.push(...nextPoints);
+      }
+
+      scheduleFlush();
+    },
+    [scheduleFlush]
+  );
+
+  const refreshSerialStatus = useCallback(async () => {
+    try {
+      const res = await axios.get("http://localhost:5000/serial/status");
+
+      setIsSerialConnected(Boolean(res.data.connected));
+
+      if (res.data.baudRate) {
+        setBaudRate(Number(res.data.baudRate));
+      }
+    } catch {
+      setIsSerialConnected(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const ws = new WebSocket("ws://localhost:5000");
+
+    ws.onmessage = (event) => {
+      const message = String(event.data);
+
+      if (
+        message.includes("[Serial connected") ||
+        message.includes("[Serial already running") ||
+        message.includes("[Serial status: connected")
+      ) {
+        setIsSerialConnected(true);
+        return;
+      }
+
+      if (
+        message.includes("[Serial status: disconnected") ||
+        message.includes("[Serial closed]") ||
+        message.includes("[Serial Error]")
+      ) {
+        setIsSerialConnected(false);
+        return;
+      }
+
+      if (message.includes("[WebSocket")) return;
+
+      queueSerialData(message);
+    };
+
+    ws.onopen = () => {
+      refreshSerialStatus();
+    };
+
+    ws.onerror = () => {
+      refreshSerialStatus();
+    };
+
+    ws.onclose = () => {
+      setIsSerialConnected(false);
+    };
+
+    return () => {
+      ws.close();
+
+      if (flushTimerRef.current) {
+        window.clearTimeout(flushTimerRef.current);
+      }
+    };
+  }, [queueSerialData, refreshSerialStatus]);
+
+  const connectSerial = useCallback(async () => {
+    try {
+      const res = await axios.post("http://localhost:5000/serial/start", {
+        port: selectedPort,
+        baudRate,
+      });
+
+      if (res.data.success) {
+        setIsSerialConnected(true);
+      }
+    } catch (err) {
+      queueSerialData(
+        "\n[Serial start error] " +
+          formatApiError(err) +
+          "\n"
+      );
+      setIsSerialConnected(false);
+    }
+  }, [baudRate, queueSerialData, selectedPort]);
+
+  const disconnectSerial = useCallback(async () => {
+    try {
+      await axios.post("http://localhost:5000/serial/stop");
+      setIsSerialConnected(false);
+    } catch (err) {
+      queueSerialData(
+        "\n[Serial stop error] " +
+          formatApiError(err) +
+          "\n"
+      );
+    }
+  }, [queueSerialData]);
+
+  const clearSerial = useCallback(() => {
+    serialBufferRef.current = "";
+    serialLineBufferRef.current = "";
+    setSerialData("");
+  }, []);
+
+  const clearPlot = useCallback(() => {
+    plotBufferRef.current = [];
+    latestMetricsBufferRef.current = {};
+    pointCounterRef.current = 0;
+    setPlotRows([]);
+    setLatestMetrics({});
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(
+      DASHBOARD_CONFIG_KEY,
+      JSON.stringify(dashboardConfig)
+    );
+  }, [dashboardConfig]);
+
+  const plotData = useMemo(
+    () => {
+      const seriesNames = Array.from(
+        new Set(plotRows.flatMap((row) => Object.keys(row.values)))
+      );
+
+      return {
+        labels: plotRows.map((row) => row.label),
+        datasets: seriesNames.map((seriesName, index) => ({
+          label: seriesName,
+          data: plotRows.map((row) => row.values[seriesName] ?? null),
+          borderColor: PLOT_COLORS[index % PLOT_COLORS.length],
+          backgroundColor: PLOT_COLORS[index % PLOT_COLORS.length],
+          tension: 0.3,
+          spanGaps: true,
+        })),
+      };
+    },
+    [plotRows]
+  );
+
+  const latestMetricEntries = Object.entries(latestMetrics);
+  const selectedDashboardMetric =
+    selectedMetric && latestMetrics[selectedMetric] !== undefined
+      ? selectedMetric
+      : latestMetricEntries[0]?.[0] || "";
+
+  const selectedDashboardConfig =
+    dashboardConfig[selectedDashboardMetric] || {};
+
+  const updateDashboardMetricConfig = useCallback((metricName, patch) => {
+    if (!metricName) return;
+
+    setDashboardConfig((prev) => ({
+      ...prev,
+      [metricName]: {
+        ...prev[metricName],
+        ...patch,
+      },
+    }));
+  }, []);
+
+  const resetDashboardMetricConfig = useCallback((metricName) => {
+    if (!metricName) return;
+
+    setDashboardConfig((prev) => {
+      const nextConfig = { ...prev };
+      delete nextConfig[metricName];
+      return nextConfig;
+    });
+  }, []);
+
+  return (
+    <>
+      <div style={{ marginTop: "15px" }}>
+        <select
+          value={baudRate}
+          onChange={(event) => setBaudRate(Number(event.target.value))}
+          style={{ marginRight: "10px" }}
+        >
+          {SERIAL_BAUD_RATES.map((rate) => (
+            <option key={rate} value={rate}>
+              {rate} baud
+            </option>
+          ))}
+        </select>
+
+        <button onClick={connectSerial}>Connect Serial</button>
+
+        <button onClick={disconnectSerial} style={{ marginLeft: "10px" }}>
+          Disconnect Serial
+        </button>
+
+        <button onClick={clearSerial} style={{ marginLeft: "10px" }}>
+          Clear Serial
+        </button>
+
+        <button onClick={clearPlot} style={{ marginLeft: "10px" }}>
+          Clear Plot
+        </button>
+      </div>
+
+      <h3>
+        Serial Monitor:{" "}
+        <span style={{ color: isSerialConnected ? "green" : "red" }}>
+          {isSerialConnected ? "Connected" : "Disconnected"}
+        </span>
+      </h3>
+
+      <div style={{ background: "#111", color: "#00ff00", padding: "10px", height: "220px", overflow: "auto", marginTop: "20px", border: "1px solid #333" }}>
+        <pre>{serialData}</pre>
+      </div>
+
+      <h3>Serial Plotter</h3>
+
+      <div style={{ height: "300px", background: "#fff", border: "1px solid #ccc", padding: "10px" }}>
+        <Line data={plotData} options={PLOT_OPTIONS} />
+      </div>
+
+      <h3>Circuit Dashboard</h3>
+
+      {latestMetricEntries.length > 0 && (
+        <div
+          style={{
+            marginBottom: "10px",
+            padding: "10px",
+            background: "#f8fafc",
+            border: "1px solid #d8dee9",
+            textAlign: "left",
+          }}
+        >
+          <select
+            value={selectedDashboardMetric}
+            onChange={(event) => setSelectedMetric(event.target.value)}
+          >
+            {latestMetricEntries.map(([name]) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+
+          <input
+            value={selectedDashboardConfig.unit || ""}
+            onChange={(event) =>
+              updateDashboardMetricConfig(selectedDashboardMetric, {
+                unit: event.target.value,
+              })
+            }
+            placeholder="unit"
+            style={{ marginLeft: "10px", padding: "5px", width: "80px" }}
+          />
+
+          <input
+            type="number"
+            value={selectedDashboardConfig.min ?? ""}
+            onChange={(event) =>
+              updateDashboardMetricConfig(selectedDashboardMetric, {
+                min: event.target.value,
+              })
+            }
+            placeholder="min"
+            style={{ marginLeft: "10px", padding: "5px", width: "80px" }}
+          />
+
+          <input
+            type="number"
+            value={selectedDashboardConfig.max ?? ""}
+            onChange={(event) =>
+              updateDashboardMetricConfig(selectedDashboardMetric, {
+                max: event.target.value,
+              })
+            }
+            placeholder="max"
+            style={{ marginLeft: "10px", padding: "5px", width: "80px" }}
+          />
+
+          <button
+            onClick={() => resetDashboardMetricConfig(selectedDashboardMetric)}
+            style={{ marginLeft: "10px" }}
+          >
+            Reset Widget
+          </button>
+        </div>
+      )}
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+          gap: "10px",
+          textAlign: "left",
+        }}
+      >
+        {latestMetricEntries.length > 0 ? (
+          latestMetricEntries.map(([name, value]) => {
+            const config = dashboardConfig[name] || {};
+            const range = getMetricRange(config);
+            const isBinary = value === 0 || value === 1;
+            const percent = range
+              ? clampPercent(((value - range.min) / (range.max - range.min)) * 100)
+              : null;
+
+            return (
+              <div
+                key={name}
+                style={{
+                  background: "#f8fafc",
+                  border: "1px solid #d8dee9",
+                  padding: "10px",
+                }}
+              >
+                <strong>{name}</strong>
+
+                <div style={{ fontSize: "24px", color: "#111827" }}>
+                  {value}
+                  {config.unit && (
+                    <span style={{ fontSize: "14px", marginLeft: "4px" }}>
+                      {config.unit}
+                    </span>
+                  )}
+                </div>
+
+                {isBinary && (
+                  <div style={{ marginTop: "8px" }}>
+                    <span
+                      style={{
+                        display: "inline-block",
+                        width: "12px",
+                        height: "12px",
+                        borderRadius: "50%",
+                        marginRight: "6px",
+                        background: value ? "#16a34a" : "#94a3b8",
+                      }}
+                    />
+                    {value ? "ON" : "OFF"}
+                  </div>
+                )}
+
+                {range && (
+                  <div style={{ marginTop: "8px" }}>
+                    <div
+                      style={{
+                        height: "8px",
+                        background: "#e5e7eb",
+                        overflow: "hidden",
+                      }}
+                    >
+                      <div
+                        style={{
+                          height: "100%",
+                          width: `${percent}%`,
+                          background: "#2563eb",
+                        }}
+                      />
+                    </div>
+                    <small>
+                      {range.min} to {range.max}
+                    </small>
+                  </div>
+                )}
+              </div>
+            );
+          })
+        ) : (
+          <div
+            style={{
+              background: "#f8fafc",
+              border: "1px solid #d8dee9",
+              padding: "10px",
+            }}
+          >
+            Waiting for serial values
+          </div>
+        )}
+      </div>
+    </>
+  );
+});
+
+function getCoreLabel(core) {
+  return (
+    core.id ||
+    core.ID ||
+    core.platform ||
+    core.name ||
+    core.package ||
+    core.platform_id ||
+    JSON.stringify(core)
+  );
+}
+
+function getCoreVersion(core) {
+  return core.installed || core.version || core.latest_version || "";
+}
+
+function getCoreInstallId(core) {
+  return (
+    core.id ||
+    core.ID ||
+    core.platform ||
+    core.platform_id ||
+    core.name ||
+    ""
+  );
+}
+
+function getPortAddress(item) {
+  return item.port?.address || item.address || item.port || "";
+}
+
+function getPortLabel(item) {
+  const address = getPortAddress(item);
+  const protocol = item.port?.protocol || item.protocol || "serial";
+
+  const boardName =
+    item.matching_boards?.[0]?.name ||
+    item.boards?.[0]?.name ||
+    "Unknown Board";
+
+  return `${address} - ${boardName} (${protocol})`;
+}
 
 function App() {
   const [installedCores, setInstalledCores] = useState([]);
   const [coreToInstall, setCoreToInstall] = useState("arduino:avr");
+  const [coreSearchQuery, setCoreSearchQuery] = useState("esp8266");
+  const [coreSearchResults, setCoreSearchResults] = useState([]);
   const [coreOutput, setCoreOutput] = useState("");
 
   const [availableBoards, setAvailableBoards] = useState([]);
   const [output, setOutput] = useState("");
-  const [serialData, setSerialData] = useState("");
-  const [isSerialConnected, setIsSerialConnected] = useState(false);
 
   const [ports, setPorts] = useState([]);
   const [selectedPort, setSelectedPort] = useState("/dev/ttyUSB0");
   const [selectedFqbn, setSelectedFqbn] = useState("esp32:esp32:esp32");
-
-  const [plotLabels, setPlotLabels] = useState([]);
-  const [plotValues, setPlotValues] = useState([]);
 
   const [projectName, setProjectName] = useState("Untitled");
   const [savedProjects, setSavedProjects] = useState([]);
@@ -68,88 +786,84 @@ function App() {
   const [librarySearchResults, setLibrarySearchResults] = useState([]);
   const [libraryOutput, setLibraryOutput] = useState("");
 
-  const [files, setFiles] = useState(() => {
-    const autosaved = localStorage.getItem(AUTOSAVE_KEY);
-    return autosaved ? JSON.parse(autosaved) : DEFAULT_FILES;
-  });
+  const [uploadMode, setUploadMode] = useState("usb");
+  const [otaIp, setOtaIp] = useState("192.168.1.100");
+  const [otaPassword, setOtaPassword] = useState("");
+
+  const [files, setFiles] = useState(readStoredFiles);
 
   const [activeFile, setActiveFile] = useState(() => {
-    const autosaved = localStorage.getItem(AUTOSAVE_KEY);
-    const loaded = autosaved ? JSON.parse(autosaved) : DEFAULT_FILES;
-    return loaded[0]?.name || "tempSketch.ino";
+    const loaded = readStoredFiles();
+    return loaded[0]?.name || MAIN_FILE;
   });
 
-  const wsRef = useRef(null);
-  const pointCounterRef = useRef(0);
   const fileInputRef = useRef(null);
+  const latestFilesRef = useRef(files);
 
-  const currentFile =
-    files.find((file) => file.name === activeFile) || files[0];
+  const currentFile = useMemo(
+    () => files.find((file) => file.name === activeFile) || files[0],
+    [activeFile, files]
+  );
 
   const currentCode = currentFile?.content || "";
 
   useEffect(() => {
-    refreshLibraries();
-    loadProjectList();
-    refreshBoards();
-    refreshBoardList();
-    refreshCores();
+    latestFilesRef.current = files;
 
-    const ws = new WebSocket("ws://localhost:5000");
-    wsRef.current = ws;
-
-    ws.onmessage = (event) => {
-      const message = event.data;
-
-      if (message.includes("[Serial connected")) {
-        setIsSerialConnected(true);
-        return;
-      }
-
-      if (
-        message.includes("[Serial closed]") ||
-        message.includes("[Serial Error]")
-      ) {
-        setIsSerialConnected(false);
-        return;
-      }
-
-      if (message.includes("[WebSocket")) return;
-      if (message.includes("[Serial already running")) return;
-
-      setSerialData((prev) => prev + message);
-      handlePlotData(message);
-    };
-
-    ws.onerror = () => {};
-
-    ws.onclose = () => {
-      setIsSerialConnected(false);
-    };
+    const autosaveTimer = window.setTimeout(() => {
+      localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(files));
+    }, AUTOSAVE_DELAY_MS);
 
     return () => {
-      ws.close();
+      window.clearTimeout(autosaveTimer);
+    };
+  }, [files]);
+
+  useEffect(() => {
+    const flushAutosave = () => {
+      localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(latestFilesRef.current));
+    };
+
+    window.addEventListener("pagehide", flushAutosave);
+
+    return () => {
+      window.removeEventListener("pagehide", flushAutosave);
     };
   }, []);
 
-  useEffect(() => {
-    localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(files));
-  }, [files]);
+  const updateCurrentFile = useCallback(
+    (content) => {
+      const nextContent = content || "";
 
-  const updateCurrentFile = (content) => {
-    setFiles((prev) =>
-      prev.map((file) =>
-        file.name === activeFile ? { ...file, content: content || "" } : file
-      )
-    );
-  };
+      setFiles((prev) => {
+        let didChange = false;
+
+        const nextFiles = prev.map((file) => {
+          if (file.name !== activeFile) return file;
+          if (file.content === nextContent) return file;
+
+          didChange = true;
+          return { ...file, content: nextContent };
+        });
+
+        return didChange ? nextFiles : prev;
+      });
+    },
+    [activeFile]
+  );
 
   const addFile = () => {
-    const name = prompt("Enter file name, example: wifi.cpp or config.h");
+    const rawName = prompt("Enter file name, example: wifi.cpp or config.h");
+    const name = cleanFileName(rawName);
 
     if (!name) return;
 
-    if (name.endsWith(".ino")) {
+    if (!isAllowedFileName(name)) {
+      setOutput("Use a source file extension like .cpp, .c, .h, .hpp, or .txt.");
+      return;
+    }
+
+    if (getFileExtension(name) === ".ino") {
       setOutput("Only one .ino file is allowed. Use .cpp / .h files.");
       return;
     }
@@ -170,6 +884,10 @@ function App() {
 
     setFiles((prev) => [...prev, newFile]);
     setActiveFile(name);
+
+    if (name !== rawName.trim()) {
+      setOutput(`Created "${name}" with unsafe characters cleaned up.`);
+    }
   };
 
   const deleteFile = () => {
@@ -189,14 +907,12 @@ function App() {
   };
 
   const loadProjectList = () => {
-    const raw = localStorage.getItem(PROJECTS_KEY);
-    const projects = raw ? JSON.parse(raw) : {};
+    const projects = readStoredProjects();
     setSavedProjects(Object.keys(projects));
   };
 
   const getProjects = () => {
-    const raw = localStorage.getItem(PROJECTS_KEY);
-    return raw ? JSON.parse(raw) : {};
+    return readStoredProjects();
   };
 
   const saveProject = () => {
@@ -209,9 +925,13 @@ function App() {
 
     const projects = getProjects();
 
+    const normalizedFiles = normalizeFiles(files);
+
     projects[name] = {
-      files,
-      activeFile,
+      files: normalizedFiles,
+      activeFile: normalizedFiles.some((file) => file.name === activeFile)
+        ? activeFile
+        : normalizedFiles[0].name,
       selectedPort,
       selectedFqbn,
       updatedAt: new Date().toISOString(),
@@ -238,13 +958,22 @@ function App() {
     setProjectName(name);
     setSelectedProject(name);
 
-    if (project.files) {
-      setFiles(project.files);
-      setActiveFile(project.activeFile || project.files[0]?.name);
-    } else if (project.code) {
-      setFiles([{ name: "tempSketch.ino", content: project.code }]);
-      setActiveFile("tempSketch.ino");
-    }
+    const projectFiles = project.files
+      ? normalizeFiles(project.files)
+      : normalizeFiles([{ name: MAIN_FILE, content: project.code || "" }]);
+
+    const storedActiveFile = cleanFileName(project.activeFile);
+    const nextActiveFile =
+      getFileExtension(storedActiveFile) === ".ino"
+        ? MAIN_FILE
+        : storedActiveFile;
+
+    setFiles(projectFiles);
+    setActiveFile(
+      projectFiles.some((file) => file.name === nextActiveFile)
+        ? nextActiveFile
+        : projectFiles[0].name
+    );
 
     if (project.selectedPort) setSelectedPort(project.selectedPort);
     if (project.selectedFqbn) setSelectedFqbn(project.selectedFqbn);
@@ -279,8 +1008,8 @@ function App() {
   const newProject = () => {
     setProjectName("Untitled");
     setSelectedProject("");
-    setFiles(DEFAULT_FILES);
-    setActiveFile("tempSketch.ino");
+    setFiles(createDefaultFiles());
+    setActiveFile(MAIN_FILE);
     setOutput("New project created.");
   };
 
@@ -306,8 +1035,27 @@ function App() {
     const reader = new FileReader();
 
     reader.onload = () => {
-      const importedCode = reader.result;
-      const importedName = file.name;
+      const importedCode =
+        typeof reader.result === "string" ? reader.result : "";
+      const importedName = cleanFileName(file.name);
+
+      if (!isAllowedFileName(importedName)) {
+        setOutput("Imported file type is not supported.");
+        return;
+      }
+
+      if (getFileExtension(importedName) === ".ino") {
+        setFiles((prev) =>
+          normalizeFiles(prev).map((item) =>
+            item.name === MAIN_FILE
+              ? { ...item, content: importedCode }
+              : item
+          )
+        );
+        setActiveFile(MAIN_FILE);
+        setOutput(`Imported ${file.name} into ${MAIN_FILE}`);
+        return;
+      }
 
       setFiles((prev) => {
         const exists = prev.some((item) => item.name === importedName);
@@ -324,35 +1072,15 @@ function App() {
       });
 
       setActiveFile(importedName);
-      setOutput(`Imported ${importedName}`);
+      setOutput(
+        importedName === file.name
+          ? `Imported ${importedName}`
+          : `Imported ${file.name} as ${importedName}`
+      );
     };
 
     reader.readAsText(file);
     event.target.value = "";
-  };
-
-  const handlePlotData = (message) => {
-    const lines = message.split(/\r?\n/);
-
-    lines.forEach((line) => {
-      const trimmed = line.trim();
-      if (trimmed === "") return;
-
-      const value = Number(trimmed);
-      if (!Number.isFinite(value)) return;
-
-      pointCounterRef.current += 1;
-
-      setPlotLabels((prev) => {
-        const updated = [...prev, pointCounterRef.current.toString()];
-        return updated.slice(-50);
-      });
-
-      setPlotValues((prev) => {
-        const updated = [...prev, value];
-        return updated.slice(-50);
-      });
-    });
   };
 
   const refreshBoards = async () => {
@@ -375,7 +1103,7 @@ function App() {
         }
       }
     } catch (err) {
-      setOutput(JSON.stringify(err.response?.data || err.message, null, 2));
+      setOutput(formatApiError(err));
     }
   };
 
@@ -385,7 +1113,7 @@ function App() {
       const boards = Array.isArray(res.data.boards) ? res.data.boards : [];
       setAvailableBoards(boards);
     } catch (err) {
-      setOutput(JSON.stringify(err.response?.data || err.message, null, 2));
+      setOutput(formatApiError(err));
     }
   };
 
@@ -399,7 +1127,7 @@ function App() {
       setInstalledLibraries(libs);
       setLibraryOutput(`Loaded ${libs.length} installed libraries.`);
     } catch (err) {
-      setLibraryOutput(JSON.stringify(err.response?.data || err.message, null, 2));
+      setLibraryOutput(formatApiError(err));
     }
   };
 
@@ -419,7 +1147,7 @@ function App() {
       setLibrarySearchResults(res.data.libraries || []);
       setLibraryOutput(`Found ${res.data.count || 0} libraries.`);
     } catch (err) {
-      setLibraryOutput(JSON.stringify(err.response?.data || err.message, null, 2));
+      setLibraryOutput(formatApiError(err));
     }
   };
 
@@ -434,7 +1162,44 @@ function App() {
       setLibraryOutput(res.data.output || `Installed ${libraryName}`);
       refreshLibraries();
     } catch (err) {
-      setLibraryOutput(JSON.stringify(err.response?.data || err.message, null, 2));
+      setLibraryOutput(formatApiError(err));
+    }
+  };
+
+  const uninstallLibrary = async (libraryName) => {
+    try {
+      if (!libraryName) {
+        setLibraryOutput("No library selected to remove.");
+        return;
+      }
+
+      setLibraryOutput(`Removing ${libraryName}...\n`);
+
+      const res = await axios.post("http://localhost:5000/libs/uninstall", {
+        library: libraryName,
+      });
+
+      setLibraryOutput(res.data.output || `Removed ${libraryName}`);
+      refreshLibraries();
+    } catch (err) {
+      setLibraryOutput(formatApiError(err));
+    }
+  };
+
+  const updateLibrary = async (libraryName = "") => {
+    try {
+      setLibraryOutput(
+        libraryName ? `Updating ${libraryName}...\n` : "Updating libraries...\n"
+      );
+
+      const res = await axios.post("http://localhost:5000/libs/upgrade", {
+        library: libraryName,
+      });
+
+      setLibraryOutput(res.data.output || "Library update complete.");
+      refreshLibraries();
+    } catch (err) {
+      setLibraryOutput(formatApiError(err));
     }
   };
 
@@ -466,9 +1231,23 @@ function App() {
       setInstalledCores(cores);
       setCoreOutput(`Loaded ${cores.length} installed cores.`);
     } catch (err) {
-      setCoreOutput(JSON.stringify(err.response?.data || err.message, null, 2));
+      setCoreOutput(formatApiError(err));
     }
   };
+
+  useEffect(() => {
+    const startupTimer = window.setTimeout(() => {
+      refreshLibraries();
+      loadProjectList();
+      refreshBoards();
+      refreshBoardList();
+      refreshCores();
+    }, 0);
+
+    return () => {
+      window.clearTimeout(startupTimer);
+    };
+  }, []);
 
   const updateCoreIndex = async () => {
     try {
@@ -481,46 +1260,94 @@ function App() {
       refreshBoardList();
       refreshCores();
     } catch (err) {
-      setCoreOutput(JSON.stringify(err.response?.data || err.message, null, 2));
+      setCoreOutput(formatApiError(err));
     }
   };
 
-  const installCore = async () => {
+  const searchCores = async () => {
     try {
-      if (!coreToInstall.trim()) {
+      if (!coreSearchQuery.trim()) {
+        setCoreOutput("Enter a core search term.");
+        return;
+      }
+
+      setCoreOutput(`Searching cores for "${coreSearchQuery}"...\n`);
+
+      const res = await axios.post("http://localhost:5000/cores/search", {
+        query: coreSearchQuery.trim(),
+      });
+
+      setCoreSearchResults(res.data.cores || []);
+      setCoreOutput(`Found ${res.data.count || 0} matching cores.`);
+    } catch (err) {
+      setCoreOutput(formatApiError(err));
+    }
+  };
+
+  const installCore = async (coreName) => {
+    const core =
+      typeof coreName === "string" && coreName.trim()
+        ? coreName.trim()
+        : coreToInstall.trim();
+
+    try {
+      if (!core) {
         setCoreOutput("Enter a core name, example: arduino:avr");
         return;
       }
 
-      setCoreOutput(`Installing ${coreToInstall}...\n`);
+      setCoreOutput(`Installing ${core}...\n`);
 
       const res = await axios.post("http://localhost:5000/cores/install", {
-        core: coreToInstall.trim(),
+        core,
       });
 
-      setCoreOutput(res.data.output || `Installed ${coreToInstall}`);
+      setCoreOutput(res.data.output || `Installed ${core}`);
 
       refreshCores();
       refreshBoardList();
     } catch (err) {
-      setCoreOutput(JSON.stringify(err.response?.data || err.message, null, 2));
+      setCoreOutput(formatApiError(err));
     }
   };
 
-  const getCoreLabel = (core) => {
-    return (
-      core.id ||
-      core.ID ||
-      core.platform ||
-      core.name ||
-      core.package ||
-      core.platform_id ||
-      JSON.stringify(core)
-    );
+  const uninstallCore = async (coreName) => {
+    try {
+      if (!coreName) {
+        setCoreOutput("No core selected to remove.");
+        return;
+      }
+
+      setCoreOutput(`Removing ${coreName}...\n`);
+
+      const res = await axios.post("http://localhost:5000/cores/uninstall", {
+        core: coreName,
+      });
+
+      setCoreOutput(res.data.output || `Removed ${coreName}`);
+
+      refreshCores();
+      refreshBoardList();
+    } catch (err) {
+      setCoreOutput(formatApiError(err));
+    }
   };
 
-  const getCoreVersion = (core) => {
-    return core.installed || core.version || core.latest_version || "";
+  const updateCore = async (coreName = "") => {
+    try {
+      setCoreOutput(coreName ? `Updating ${coreName}...\n` : "Updating cores...\n");
+
+      const res = await axios.post("http://localhost:5000/cores/upgrade", {
+        core: coreName,
+      });
+
+      setCoreOutput(res.data.output || "Core update complete.");
+
+      refreshCores();
+      refreshBoardList();
+    } catch (err) {
+      setCoreOutput(formatApiError(err));
+    }
   };
 
   const compileCode = async () => {
@@ -535,7 +1362,7 @@ function App() {
 
       setOutput(res.data.output);
     } catch (err) {
-      setOutput(JSON.stringify(err.response?.data || err.message, null, 2));
+      setOutput(formatApiError(err));
     }
   };
 
@@ -552,96 +1379,125 @@ function App() {
 
       setOutput(res.data.output);
     } catch (err) {
-      setOutput(JSON.stringify(err.response?.data || err.message, null, 2));
+      setOutput(formatApiError(err));
     }
   };
 
-  const connectSerial = async () => {
+  const uploadOtaCode = async () => {
     try {
-      await axios.post("http://localhost:5000/serial/start", {
-        port: selectedPort,
+      if (!otaIp.trim()) {
+        setOutput("Enter ESP32 OTA IP address.");
+        return;
+      }
+
+      setOutput(`Uploading OTA to ${otaIp}...\n`);
+
+      const res = await axios.post("http://localhost:5000/upload-ota", {
+        files,
+        code: currentCode,
+        fqbn: selectedFqbn,
+        otaIp: otaIp.trim(),
+        otaPassword,
       });
+
+      setOutput(res.data.output);
     } catch (err) {
-      setSerialData(
-        (prev) =>
-          prev +
-          "\n[Serial start error] " +
-          JSON.stringify(err.response?.data || err.message) +
-          "\n"
-      );
+      setOutput(formatApiError(err));
     }
   };
 
-  const disconnectSerial = async () => {
-    try {
-      await axios.post("http://localhost:5000/serial/stop");
-      setIsSerialConnected(false);
-    } catch (err) {
-      setSerialData(
-        (prev) =>
-          prev +
-          "\n[Serial stop error] " +
-          JSON.stringify(err.response?.data || err.message) +
-          "\n"
-      );
-    }
-  };
+  const savedProjectOptions = useMemo(
+    () =>
+      savedProjects.map((name) => (
+        <option key={name} value={name}>
+          {name}
+        </option>
+      )),
+    [savedProjects]
+  );
 
-  const clearSerial = () => {
-    setSerialData("");
-  };
+  const portOptions = useMemo(
+    () =>
+      ports.map((item, index) => {
+        const address = getPortAddress(item);
+        if (!address) return null;
 
-  const clearPlot = () => {
-    setPlotLabels([]);
-    setPlotValues([]);
-    pointCounterRef.current = 0;
-  };
+        return (
+          <option key={`${address}-${index}`} value={address}>
+            {getPortLabel(item)}
+          </option>
+        );
+      }),
+    [ports]
+  );
 
-  const getPortAddress = (item) => {
-    return item.port?.address || item.address || item.port || "";
-  };
-
-  const getPortLabel = (item) => {
-    const address = getPortAddress(item);
-    const protocol = item.port?.protocol || item.protocol || "serial";
-
-    const boardName =
-      item.matching_boards?.[0]?.name ||
-      item.boards?.[0]?.name ||
-      "Unknown Board";
-
-    return `${address} - ${boardName} (${protocol})`;
-  };
-
-  const plotData = {
-    labels: plotLabels,
-    datasets: [
-      {
-        label: "Serial Value",
-        data: plotValues,
-        tension: 0.3,
-      },
-    ],
-  };
-
-  const plotOptions = {
-    responsive: true,
-    animation: false,
-    maintainAspectRatio: false,
-  };
+  const boardOptions = useMemo(
+    () =>
+      availableBoards.map((board, index) => (
+        <option key={`${board.fqbn}-${index}`} value={board.fqbn}>
+          {board.name} - {board.fqbn}
+        </option>
+      )),
+    [availableBoards]
+  );
 
   return (
-    <div style={{ padding: "20px" }}>
-      <h1>Prompt II Edge</h1>
+    <div className="app-shell">
+      <header className="topbar">
+        <div>
+          <p className="eyebrow">Web Arduino IDE</p>
+          <h1>Prompt II Edge</h1>
+        </div>
 
-      <div style={{ marginBottom: "15px", padding: "10px", background: "#e9f5ff", border: "1px solid #9bc9ee" }}>
-        <h3>Project</h3>
+        <div className="topbar-actions">
+          <button className="primary-action" onClick={compileCode}>
+            Compile
+          </button>
 
+          <select
+            value={uploadMode}
+            onChange={(e) => setUploadMode(e.target.value)}
+            aria-label="Upload mode"
+          >
+            <option value="usb">USB Upload</option>
+            <option value="ota">ESP32 OTA Upload</option>
+          </select>
+
+          {uploadMode === "usb" ? (
+            <button className="primary-action" onClick={uploadCode}>
+              Upload USB
+            </button>
+          ) : (
+            <>
+              <input
+                value={otaIp}
+                onChange={(e) => setOtaIp(e.target.value)}
+                placeholder="ESP32 IP"
+                className="ota-input"
+              />
+
+              <input
+                value={otaPassword}
+                onChange={(e) => setOtaPassword(e.target.value)}
+                placeholder="OTA password"
+                className="ota-input"
+                type="password"
+              />
+
+              <button className="primary-action" onClick={uploadOtaCode}>
+                Upload OTA
+              </button>
+            </>
+          )}
+        </div>
+      </header>
+
+      <section className="project-bar">
         <input
           ref={fileInputRef}
           type="file"
-          accept=".ino,.cpp,.h,.txt"
-          style={{ display: "none" }}
+          accept=".ino,.cpp,.c,.h,.hpp,.txt"
+          className="hidden-input"
           onChange={importFile}
         />
 
@@ -649,303 +1505,292 @@ function App() {
           value={projectName}
           onChange={(e) => setProjectName(e.target.value)}
           placeholder="Project name"
-          style={{ padding: "5px", width: "220px" }}
+          className="project-name-input"
         />
 
-        <button onClick={newProject} style={{ marginLeft: "10px" }}>
-          New Project
-        </button>
+        <button onClick={newProject}>New Project</button>
 
-        <button onClick={saveProject} style={{ marginLeft: "10px" }}>
-          Save Project
-        </button>
+        <button onClick={saveProject}>Save Project</button>
 
-        <button onClick={exportCurrentFile} style={{ marginLeft: "10px" }}>
+        <button onClick={exportCurrentFile}>
           Export Current File
         </button>
 
-        <button onClick={() => fileInputRef.current.click()} style={{ marginLeft: "10px" }}>
+        <button onClick={() => fileInputRef.current?.click()}>
           Import File
         </button>
 
-        <select value={selectedProject} onChange={(e) => openProject(e.target.value)} style={{ marginLeft: "10px" }}>
+        <select
+          value={selectedProject}
+          onChange={(e) => openProject(e.target.value)}
+        >
           <option value="">Open Saved Project</option>
-          {savedProjects.map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
+          {savedProjectOptions}
         </select>
 
-        <button onClick={deleteProject} style={{ marginLeft: "10px" }}>
-          Delete Project
+        <button className="danger-action" onClick={deleteProject}>
+          Delete
         </button>
-      </div>
+      </section>
 
-      <div style={{ marginBottom: "15px", padding: "10px", background: "#f3f3f3", border: "1px solid #ccc" }}>
+      <section className="connection-bar">
         <button onClick={refreshBoards}>Refresh Boards</button>
 
-        <button onClick={refreshBoardList} style={{ marginLeft: "10px" }}>
+        <button onClick={refreshBoardList}>
           Refresh Board List
         </button>
 
-        <select value={selectedPort} onChange={(e) => setSelectedPort(e.target.value)} style={{ marginLeft: "10px" }}>
+        <select
+          value={selectedPort}
+          onChange={(e) => setSelectedPort(e.target.value)}
+          aria-label="Serial port"
+        >
           <option value="/dev/ttyUSB0">/dev/ttyUSB0</option>
           <option value="/dev/ttyUSB1">/dev/ttyUSB1</option>
           <option value="/dev/ttyACM0">/dev/ttyACM0</option>
           <option value="/dev/ttyACM1">/dev/ttyACM1</option>
 
-          {ports.map((item, index) => {
-            const address = getPortAddress(item);
-            if (!address) return null;
-
-            return (
-              <option key={`${address}-${index}`} value={address}>
-                {getPortLabel(item)}
-              </option>
-            );
-          })}
+          {portOptions}
         </select>
 
-        <select value={selectedFqbn} onChange={(e) => setSelectedFqbn(e.target.value)} style={{ marginLeft: "10px", maxWidth: "320px" }}>
+        <select
+          value={selectedFqbn}
+          onChange={(e) => setSelectedFqbn(e.target.value)}
+          aria-label="Board"
+          className="board-select"
+        >
           <option value="esp32:esp32:esp32">ESP32 Dev Module</option>
 
-          {availableBoards.map((board, index) => (
-            <option key={`${board.fqbn}-${index}`} value={board.fqbn}>
-              {board.name} - {board.fqbn}
-            </option>
-          ))}
+          {boardOptions}
         </select>
 
-        <div style={{ marginTop: "8px", fontSize: "14px" }}>
-          <strong>Selected Port:</strong> {selectedPort}
-          <br />
-          <strong>Selected Board:</strong> {selectedFqbn}
+        <span className="status-chip">{selectedPort}</span>
+        <span className="status-chip">{selectedFqbn}</span>
+      </section>
+
+      <main className="workspace-grid">
+        <aside className="panel file-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Sketch</p>
+              <h2>Files</h2>
+            </div>
+          </div>
+
+          <div className="file-list">
+            {files.map((file) => (
+              <button
+                key={file.name}
+                onClick={() => setActiveFile(file.name)}
+                className={activeFile === file.name ? "file-tab active" : "file-tab"}
+              >
+                {file.name}
+              </button>
+            ))}
+          </div>
+
+          <div className="button-row">
+            <button onClick={addFile}>Add File</button>
+            <button className="danger-action" onClick={deleteFile}>
+              Delete File
+            </button>
+          </div>
+        </aside>
+
+        <section className="panel editor-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Active File</p>
+              <h2>{activeFile}</h2>
+            </div>
+          </div>
+
+          <CodeEditor
+            fileName={activeFile}
+            code={currentCode}
+            onChange={updateCurrentFile}
+          />
+
+          <div className="output-panel">
+            <div className="panel-heading compact-heading">
+              <h2>Compiler / Upload Output</h2>
+            </div>
+
+            <pre className="console-output">{output}</pre>
+          </div>
+        </section>
+      </main>
+
+      <section className="manager-grid">
+        <div className="panel manager-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Arduino CLI</p>
+              <h2>Board Manager</h2>
+            </div>
+          </div>
+
+          <div className="button-row">
+            <button onClick={refreshCores}>Refresh Installed Cores</button>
+            <button onClick={updateCoreIndex}>Update Core Index</button>
+            <button onClick={() => updateCore()}>Update All Cores</button>
+          </div>
+
+          <div className="search-row">
+            <input
+              value={coreSearchQuery}
+              onChange={(e) => setCoreSearchQuery(e.target.value)}
+              placeholder="Search core, example: esp8266"
+            />
+
+            <button onClick={searchCores}>Search Cores</button>
+          </div>
+
+          <div className="search-row">
+            <input
+              value={coreToInstall}
+              onChange={(e) => setCoreToInstall(e.target.value)}
+              placeholder="example: arduino:avr"
+            />
+
+            <button onClick={() => installCore()}>Install Core</button>
+          </div>
+
+          <h3>Core Search Results</h3>
+
+          <div className="result-list">
+            {coreSearchResults.map((core, index) => {
+              const coreId = getCoreInstallId(core);
+
+              return (
+                <div className="result-item" key={`${coreId}-${index}`}>
+                  <strong>{coreId}</strong> {core.version && `v${core.version}`}
+                  <small>{core.name}</small>
+
+                  <button onClick={() => installCore(coreId)}>Install</button>
+                </div>
+              );
+            })}
+          </div>
+
+          <h3>Installed Cores</h3>
+
+          <ul className="installed-list">
+            {installedCores.map((core, index) => {
+              const coreId = getCoreInstallId(core) || getCoreLabel(core);
+
+              return (
+                <li key={`${coreId}-${index}`}>
+                  <span>
+                    {getCoreLabel(core)} {getCoreVersion(core)}
+                  </span>
+
+                  <div>
+                    <button onClick={() => updateCore(coreId)}>Update</button>
+                    <button
+                      className="danger-action"
+                      onClick={() => uninstallCore(coreId)}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+
+          <pre className="console-output manager-output">{coreOutput}</pre>
         </div>
-      </div>
 
-      <div
-        style={{
-          marginBottom: "15px",
-          padding: "10px",
-          background: "#fff7e6",
-          border: "1px solid #f0c36d",
-        }}
-      >
-        <h3>Board Manager</h3>
+        <div className="panel manager-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Arduino CLI</p>
+              <h2>Library Manager</h2>
+            </div>
+          </div>
 
-        <button onClick={refreshCores}>Refresh Installed Cores</button>
+          <div className="button-row">
+            <button onClick={refreshLibraries}>Refresh Installed Libraries</button>
+            <button onClick={() => updateLibrary()}>Update All Libraries</button>
+          </div>
 
-        <button onClick={updateCoreIndex} style={{ marginLeft: "10px" }}>
-          Update Core Index
-        </button>
+          <div className="search-row">
+            <input
+              value={librarySearchQuery}
+              onChange={(e) => setLibrarySearchQuery(e.target.value)}
+              placeholder="Search library, example: wifi"
+            />
 
-        <input
-          value={coreToInstall}
-          onChange={(e) => setCoreToInstall(e.target.value)}
-          placeholder="example: arduino:avr"
-          style={{ marginLeft: "10px", padding: "5px", width: "220px" }}
-        />
+            <button onClick={searchLibraries}>Search Libraries</button>
+          </div>
 
-        <button onClick={installCore} style={{ marginLeft: "10px" }}>
-          Install Core
-        </button>
+          <h3>Search Results</h3>
 
-        <div style={{ marginTop: "10px" }}>
-          <strong>Installed Cores:</strong>
+          <div className="result-list">
+            {librarySearchResults.map((lib, index) => (
+              <div className="result-item" key={`${lib.name}-${index}`}>
+                <strong>{lib.name}</strong> {lib.version && `v${lib.version}`}
+                <small>{lib.sentence}</small>
+                <small>
+                  {lib.author} | {lib.category}
+                </small>
 
-        <ul
-          style={{
-            textAlign: "left",
-            maxWidth: "600px",
-            margin: "10px auto",
-          }}
-        >
-            {installedCores.map((core, index) => (
-              <li key={index}>
-                {getCoreLabel(core)} {getCoreVersion(core)}
+                {lib.includes?.length > 0 && (
+                  <small>Includes: {lib.includes.join(", ")}</small>
+                )}
+
+                <div className="button-row">
+                  <button onClick={() => installLibrary(lib.name)}>
+                    Install
+                  </button>
+
+                  {lib.includes?.[0] && (
+                    <button onClick={() => insertInclude(lib.includes[0])}>
+                      Insert Include
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <h3>Installed Libraries</h3>
+
+          <ul className="installed-list">
+            {installedLibraries.map((lib, index) => (
+              <li key={`${lib.name}-${index}`}>
+                <span>
+                  {lib.name} {lib.version && `v${lib.version}`}
+                </span>
+
+                <div>
+                  <button onClick={() => updateLibrary(lib.name)}>Update</button>
+                  <button
+                    className="danger-action"
+                    onClick={() => uninstallLibrary(lib.name)}
+                  >
+                    Remove
+                  </button>
+                </div>
               </li>
             ))}
           </ul>
+
+          <pre className="console-output manager-output">{libraryOutput}</pre>
+        </div>
+      </section>
+
+      <section className="panel serial-panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Live Tools</p>
+            <h2>Serial Monitor / Plotter / Dashboard</h2>
+          </div>
         </div>
 
-        <pre
-          style={{
-            background: "#222",
-            color: "#fff",
-            padding: "10px",
-            overflow: "auto",
-            maxHeight: "180px",
-          }}
-        >
-          {coreOutput}
-        </pre>
-      </div>
-
-      <div style={{ display: "flex", gap: "6px", marginBottom: "6px", alignItems: "center" }}>
-        {files.map((file) => (
-          <button
-            key={file.name}
-            onClick={() => setActiveFile(file.name)}
-            style={{
-              padding: "6px 10px",
-              background: activeFile === file.name ? "#222" : "#ddd",
-              color: activeFile === file.name ? "#fff" : "#000",
-              border: "1px solid #999",
-            }}
-          >
-            {file.name}
-          </button>
-        ))}
-
-        <button onClick={addFile}>+ Add File</button>
-        <button onClick={deleteFile}>Delete File</button>
-      </div>
-
-      <div
-        style={{
-          marginBottom: "15px",
-          padding: "10px",
-          background: "#eefbea",
-          border: "1px solid #8dcc80",
-        }}
-      >
-        <h3>Library Manager</h3>
-
-        <button onClick={refreshLibraries}>Refresh Installed Libraries</button>
-
-        <input
-          value={librarySearchQuery}
-          onChange={(e) => setLibrarySearchQuery(e.target.value)}
-          placeholder="Search library, example: wifi"
-          style={{ marginLeft: "10px", padding: "5px", width: "240px" }}
-        />
-
-        <button onClick={searchLibraries} style={{ marginLeft: "10px" }}>
-          Search Libraries
-        </button>
-
-        <h4>Search Results</h4>
-
-        <div style={{ maxHeight: "220px", overflow: "auto" }}>
-          {librarySearchResults.map((lib, index) => (
-            <div
-              key={`${lib.name}-${index}`}
-              style={{
-                padding: "8px",
-                marginBottom: "8px",
-                background: "#fff",
-                border: "1px solid #ccc",
-              }}
-            >
-              <strong>{lib.name}</strong> {lib.version && `v${lib.version}`}
-              <br />
-              <small>{lib.sentence}</small>
-              <br />
-              <small>
-                {lib.author} | {lib.category}
-              </small>
-              <br />
-
-              {lib.includes?.length > 0 && (
-                <small>Includes: {lib.includes.join(", ")}</small>
-              )}
-
-              <br />
-
-              <button onClick={() => installLibrary(lib.name)}>
-                Install
-              </button>
-
-              {lib.includes?.[0] && (
-                <button
-                  onClick={() => insertInclude(lib.includes[0])}
-                  style={{ marginLeft: "10px" }}
-                >
-                  Insert Include
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-
-        <h4>Installed Libraries</h4>
-
-        <ul style={{ maxHeight: "140px", overflow: "auto" }}>
-          {installedLibraries.map((lib, index) => (
-            <li key={index}>
-              {lib.name} {lib.version && `v${lib.version}`}
-            </li>
-          ))}
-        </ul>
-
-        <pre
-          style={{
-            background: "#222",
-            color: "#fff",
-            padding: "10px",
-            overflow: "auto",
-            maxHeight: "180px",
-          }}
-        >
-          {libraryOutput}
-        </pre>
-      </div>
-
-      <Editor
-        height="500px"
-        defaultLanguage="cpp"
-        theme="vs-dark"
-        value={currentCode}
-        onChange={(value) => updateCurrentFile(value || "")}
-      />
-
-      <br />
-
-      <button onClick={compileCode}>Compile</button>
-
-      <button onClick={uploadCode} style={{ marginLeft: "10px" }}>
-        Upload
-      </button>
-
-      <button onClick={connectSerial} style={{ marginLeft: "10px" }}>
-        Connect Serial
-      </button>
-
-      <button onClick={disconnectSerial} style={{ marginLeft: "10px" }}>
-        Disconnect Serial
-      </button>
-
-      <button onClick={clearSerial} style={{ marginLeft: "10px" }}>
-        Clear Serial
-      </button>
-
-      <button onClick={clearPlot} style={{ marginLeft: "10px" }}>
-        Clear Plot
-      </button>
-
-      <h3>Compiler / Upload Output</h3>
-
-      <pre style={{ background: "#222", color: "#fff", padding: "10px", overflow: "auto", maxHeight: "280px" }}>
-        {output}
-      </pre>
-
-      <h3>
-        Serial Monitor:{" "}
-        <span style={{ color: isSerialConnected ? "green" : "red" }}>
-          {isSerialConnected ? "Connected" : "Disconnected"}
-        </span>
-      </h3>
-
-      <div style={{ background: "#111", color: "#00ff00", padding: "10px", height: "220px", overflow: "auto", marginTop: "20px", border: "1px solid #333" }}>
-        <pre>{serialData}</pre>
-      </div>
-
-      <h3>Serial Plotter</h3>
-
-      <div style={{ height: "300px", background: "#fff", border: "1px solid #ccc", padding: "10px" }}>
-        <Line data={plotData} options={plotOptions} />
-      </div>
+        <SerialConsole selectedPort={selectedPort} />
+      </section>
     </div>
   );
 }

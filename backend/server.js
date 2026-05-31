@@ -2,7 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const cors = require("cors");
-const { exec, spawn } = require("child_process");
+const { spawn } = require("child_process");
 const { SerialPort } = require("serialport");
 const WebSocket = require("ws");
 
@@ -13,44 +13,123 @@ app.use(express.json({ limit: "5mb" }));
 
 const DEFAULT_PORT = "/dev/ttyUSB0";
 const DEFAULT_FQBN = "esp32:esp32:esp32";
-const SKETCH_DIR = "./tempSketch";
+const DEFAULT_BAUD_RATE = 115200;
+const SKETCH_DIR = path.join(__dirname, "tempSketch");
 const MAIN_FILE = "tempSketch.ino";
+const DEFAULT_OTA_IP = "192.168.1.100";
+const DEFAULT_OTA_PASSWORD = "";
+const BOARD_LIST_CACHE_MS = 5 * 60 * 1000;
+const SERVER_HOST = process.env.HOST || "127.0.0.1";
+const SERVER_PORT = Number(process.env.PORT) || 5000;
 
 let serialPort = null;
 let activeSerialPath = DEFAULT_PORT;
+let activeSerialBaudRate = DEFAULT_BAUD_RATE;
 let clients = [];
+let boardListCache = null;
+let boardListCacheAt = 0;
+let expectedSerialClose = false;
+
+function getCachedBoardList() {
+  if (!boardListCache) return null;
+  if (Date.now() - boardListCacheAt > BOARD_LIST_CACHE_MS) return null;
+
+  return boardListCache;
+}
+
+function setBoardListCache(payload) {
+  boardListCache = payload;
+  boardListCacheAt = Date.now();
+}
+
+function clearBoardListCache() {
+  boardListCache = null;
+  boardListCacheAt = 0;
+}
 
 function cleanSketchDir() {
   if (fs.existsSync(SKETCH_DIR)) {
     fs.rmSync(SKETCH_DIR, { recursive: true, force: true });
   }
 
-  fs.mkdirSync(SKETCH_DIR);
+  fs.mkdirSync(SKETCH_DIR, { recursive: true });
 }
 
 function safeFileName(name) {
-  return name.replace(/[^a-zA-Z0-9_.-]/g, "_");
+  const baseName = String(name || MAIN_FILE).split(/[\\/]/).pop();
+  const safeName = baseName.replace(/[^a-zA-Z0-9_.-]/g, "_");
+
+  return safeName && safeName !== "." && safeName !== ".."
+    ? safeName
+    : MAIN_FILE;
+}
+
+function requestString(value, fallback) {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function requestNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function sketchContent(value) {
+  return typeof value === "string" ? value : "";
+}
+
+function getCoreId(core) {
+  if (!core || typeof core !== "object") return "";
+
+  return (
+    core.id ||
+    core.ID ||
+    core.platform ||
+    core.platform_id ||
+    core.name ||
+    [core.package, core.architecture].filter(Boolean).join(":") ||
+    ""
+  );
+}
+
+function getLibraryName(library) {
+  if (!library || typeof library !== "object") return "";
+
+  return (
+    library.name ||
+    library.library?.name ||
+    library.metadata?.name ||
+    library.properties?.name ||
+    ""
+  );
 }
 
 function saveSketchFiles(files, fallbackCode) {
   cleanSketchDir();
 
   if (Array.isArray(files) && files.length > 0) {
+    const writtenFiles = new Set();
+    let hasMainFile = false;
+
     files.forEach((file) => {
-      const name = safeFileName(file.name || MAIN_FILE);
-      fs.writeFileSync(path.join(SKETCH_DIR, name), file.content || "");
+      const safeName = safeFileName(file.name || MAIN_FILE);
+      const isIno = safeName.toLowerCase().endsWith(".ino");
+      const name = isIno ? MAIN_FILE : safeName;
+
+      if (writtenFiles.has(name)) return;
+
+      writtenFiles.add(name);
+      hasMainFile = hasMainFile || name === MAIN_FILE;
+      fs.writeFileSync(path.join(SKETCH_DIR, name), sketchContent(file.content));
     });
 
-    const hasIno = files.some((file) => file.name?.endsWith(".ino"));
-
-    if (!hasIno) {
-      fs.writeFileSync(path.join(SKETCH_DIR, MAIN_FILE), fallbackCode || "");
+    if (!hasMainFile) {
+      fs.writeFileSync(path.join(SKETCH_DIR, MAIN_FILE), sketchContent(fallbackCode));
     }
 
     return;
   }
 
-  fs.writeFileSync(path.join(SKETCH_DIR, MAIN_FILE), fallbackCode || "");
+  fs.writeFileSync(path.join(SKETCH_DIR, MAIN_FILE), sketchContent(fallbackCode));
 }
 
 function sendToClients(data) {
@@ -61,13 +140,46 @@ function sendToClients(data) {
   });
 }
 
-function openSerial(portPath = DEFAULT_PORT, baudRate = 115200) {
+function isSerialOpen() {
+  return Boolean(serialPort && serialPort.isOpen);
+}
+
+function getSerialStatusPayload() {
+  return {
+    success: true,
+    connected: isSerialOpen(),
+    port: activeSerialPath,
+    baudRate: activeSerialBaudRate,
+  };
+}
+
+function sendSerialStatus(ws) {
+  const status = getSerialStatusPayload();
+  const label = status.connected ? "connected" : "disconnected";
+
+  ws.send(
+    `[Serial status: ${label} on ${status.port} at ${status.baudRate} baud]\n`
+  );
+}
+
+function openSerial(portPath = DEFAULT_PORT, baudRate = DEFAULT_BAUD_RATE) {
   if (serialPort && serialPort.isOpen) {
-    sendToClients(`[Serial already running on ${activeSerialPath}]\n`);
+    if (activeSerialPath === portPath && activeSerialBaudRate === baudRate) {
+      sendToClients(
+        `[Serial already running on ${activeSerialPath} at ${activeSerialBaudRate} baud]\n`
+      );
+      return;
+    }
+
+    sendToClients(
+      `[Switching serial from ${activeSerialPath} at ${activeSerialBaudRate} baud to ${portPath} at ${baudRate} baud]\n`
+    );
+    closeSerial(() => openSerial(portPath, baudRate));
     return;
   }
 
   activeSerialPath = portPath;
+  activeSerialBaudRate = baudRate;
 
   serialPort = new SerialPort({
     path: portPath,
@@ -82,7 +194,7 @@ function openSerial(portPath = DEFAULT_PORT, baudRate = 115200) {
       return;
     }
 
-    sendToClients(`[Serial connected: ${portPath}]\n`);
+    sendToClients(`[Serial connected: ${portPath} at ${baudRate} baud]\n`);
   });
 
   serialPort.on("data", (data) => {
@@ -90,6 +202,13 @@ function openSerial(portPath = DEFAULT_PORT, baudRate = 115200) {
   });
 
   serialPort.on("close", () => {
+    serialPort = null;
+
+    if (expectedSerialClose) {
+      expectedSerialClose = false;
+      return;
+    }
+
     sendToClients("\n[Serial closed]\n");
   });
 
@@ -100,6 +219,8 @@ function openSerial(portPath = DEFAULT_PORT, baudRate = 115200) {
 
 function closeSerial(callback) {
   if (serialPort && serialPort.isOpen) {
+    expectedSerialClose = true;
+
     serialPort.close(() => {
       serialPort = null;
       sendToClients("\n[Serial closed]\n");
@@ -111,15 +232,18 @@ function closeSerial(callback) {
   }
 }
 
-function runCommand(command, callback) {
-  exec(command, { maxBuffer: 1024 * 1024 * 10 }, callback);
-}
-
 function runSpawnCommand(command, args, callback) {
   const child = spawn(command, args);
 
   let stdout = "";
   let stderr = "";
+  let hasFinished = false;
+
+  const finish = (code, finalStdout = stdout, finalStderr = stderr) => {
+    if (hasFinished) return;
+    hasFinished = true;
+    callback(code, finalStdout, finalStderr);
+  };
 
   child.stdout.on("data", (data) => {
     stdout += data.toString();
@@ -129,14 +253,49 @@ function runSpawnCommand(command, args, callback) {
     stderr += data.toString();
   });
 
+  child.on("error", (error) => {
+    finish(1, stdout, stderr || error.message);
+  });
+
   child.on("close", (code) => {
-    callback(code, stdout, stderr);
+    finish(code, stdout, stderr);
   });
 }
 
+function runArduinoCli(args, callback) {
+  runSpawnCommand("arduino-cli", args, callback);
+}
+
+function runArduinoCliSequence(argsList, callback) {
+  let index = 0;
+  let stdout = "";
+  let stderr = "";
+
+  const runNext = () => {
+    if (index >= argsList.length) {
+      callback(0, stdout, stderr);
+      return;
+    }
+
+    runArduinoCli(argsList[index], (code, nextStdout, nextStderr) => {
+      stdout += nextStdout;
+      stderr += nextStderr;
+
+      if (code !== 0) {
+        callback(code, stdout, stderr);
+        return;
+      }
+
+      index += 1;
+      runNext();
+    });
+  };
+
+  runNext();
+}
+
 app.get("/cores", (req, res) => {
-  runSpawnCommand(
-    "arduino-cli",
+  runArduinoCli(
     ["core", "list", "--format", "json"],
     (code, stdout, stderr) => {
       if (code !== 0) {
@@ -168,8 +327,7 @@ app.get("/cores", (req, res) => {
 });
 
 app.post("/cores/update-index", (req, res) => {
-  runSpawnCommand(
-    "arduino-cli",
+  runArduinoCli(
     ["core", "update-index"],
     (code, stdout, stderr) => {
       if (code !== 0) {
@@ -179,6 +337,8 @@ app.post("/cores/update-index", (req, res) => {
         });
       }
 
+      clearBoardListCache();
+
       res.json({
         success: true,
         output: stdout || "Core index updated successfully.",
@@ -187,8 +347,66 @@ app.post("/cores/update-index", (req, res) => {
   );
 });
 
+app.post("/cores/search", (req, res) => {
+  const query = requestString(req.body.query, "");
+
+  if (!query) {
+    return res.status(400).json({
+      success: false,
+      error: "Core search query is required.",
+    });
+  }
+
+  runArduinoCli(
+    ["core", "search", query, "--format", "json"],
+    (code, stdout, stderr) => {
+      if (code !== 0) {
+        return res.status(500).json({
+          success: false,
+          error: stderr || `arduino-cli exited with code ${code}`,
+        });
+      }
+
+      try {
+        const parsed = JSON.parse(stdout);
+        const cores = Array.isArray(parsed)
+          ? parsed
+          : parsed.platforms || parsed.items || parsed.results || parsed.cores || [];
+
+        const cleanedCores = cores
+          .filter((core) => getCoreId(core))
+          .map((core) => ({
+            id: getCoreId(core),
+            name: core.name || core.maintainer || getCoreId(core),
+            version:
+              core.latest ||
+              core.latest_version ||
+              core.version ||
+              core.installed ||
+              "",
+            installed: core.installed || core.installed_version || "",
+            raw: core,
+          }))
+          .slice(0, 50);
+
+        res.json({
+          success: true,
+          count: cleanedCores.length,
+          cores: cleanedCores,
+        });
+      } catch {
+        res.status(500).json({
+          success: false,
+          error: "Could not parse core search JSON",
+          raw: stdout,
+        });
+      }
+    }
+  );
+});
+
 app.post("/cores/install", (req, res) => {
-  const core = req.body.core;
+  const core = requestString(req.body.core, "");
 
   if (!core) {
     return res.status(400).json({
@@ -197,8 +415,7 @@ app.post("/cores/install", (req, res) => {
     });
   }
 
-  runSpawnCommand(
-    "arduino-cli",
+  runArduinoCli(
     ["core", "install", core],
     (code, stdout, stderr) => {
       if (code !== 0) {
@@ -208,6 +425,8 @@ app.post("/cores/install", (req, res) => {
         });
       }
 
+      clearBoardListCache();
+
       res.json({
         success: true,
         output: stdout || `Installed core: ${core}`,
@@ -216,16 +435,67 @@ app.post("/cores/install", (req, res) => {
   );
 });
 
+app.post("/cores/uninstall", (req, res) => {
+  const core = requestString(req.body.core, "");
+
+  if (!core) {
+    return res.status(400).json({
+      success: false,
+      error: "Core name is required.",
+    });
+  }
+
+  runArduinoCli(
+    ["core", "uninstall", core],
+    (code, stdout, stderr) => {
+      if (code !== 0) {
+        return res.status(500).json({
+          success: false,
+          error: stderr || `arduino-cli exited with code ${code}`,
+        });
+      }
+
+      clearBoardListCache();
+
+      res.json({
+        success: true,
+        output: stdout || `Removed core: ${core}`,
+      });
+    }
+  );
+});
+
+app.post("/cores/upgrade", (req, res) => {
+  const core = requestString(req.body.core, "");
+  const args = core ? ["core", "upgrade", core] : ["core", "upgrade"];
+
+  runArduinoCli(args, (code, stdout, stderr) => {
+    if (code !== 0) {
+      return res.status(500).json({
+        success: false,
+        error: stderr || `arduino-cli exited with code ${code}`,
+      });
+    }
+
+    clearBoardListCache();
+
+    res.json({
+      success: true,
+      output: stdout || (core ? `Updated core: ${core}` : "Updated cores."),
+    });
+  });
+});
+
 app.get("/", (req, res) => {
   res.send("Arduino IDE Backend Running");
 });
 
 app.get("/boards", (req, res) => {
-  runCommand("arduino-cli board list --format json", (error, stdout, stderr) => {
-    if (error) {
+  runArduinoCli(["board", "list", "--format", "json"], (code, stdout, stderr) => {
+    if (code !== 0) {
       return res.status(500).json({
         success: false,
-        error: stderr || error.message,
+        error: stderr || `arduino-cli exited with code ${code}`,
       });
     }
 
@@ -248,25 +518,16 @@ app.get("/boards", (req, res) => {
 });
 
 app.get("/board-list", (req, res) => {
-  const child = spawn("arduino-cli", [
-    "board",
-    "listall",
-    "--format",
-    "json",
-  ]);
+  const cachedBoards = getCachedBoardList();
 
-  let stdout = "";
-  let stderr = "";
+  if (cachedBoards) {
+    return res.json({
+      ...cachedBoards,
+      cached: true,
+    });
+  }
 
-  child.stdout.on("data", (data) => {
-    stdout += data.toString();
-  });
-
-  child.stderr.on("data", (data) => {
-    stderr += data.toString();
-  });
-
-  child.on("close", (code) => {
+  runArduinoCli(["board", "listall", "--format", "json"], (code, stdout, stderr) => {
     if (code !== 0) {
       return res.status(500).json({
         success: false,
@@ -292,10 +553,17 @@ app.get("/board-list", (req, res) => {
           fqbn: board.fqbn,
         }));
 
-      res.json({
+      const payload = {
         success: true,
         count: cleanedBoards.length,
         boards: cleanedBoards,
+      };
+
+      setBoardListCache(payload);
+
+      res.json({
+        ...payload,
+        cached: false,
       });
     } catch {
       res.status(500).json({
@@ -307,17 +575,17 @@ app.get("/board-list", (req, res) => {
 });
 
 app.post("/compile", (req, res) => {
-  const selectedFqbn = req.body.fqbn || DEFAULT_FQBN;
+  const selectedFqbn = requestString(req.body.fqbn, DEFAULT_FQBN);
 
   saveSketchFiles(req.body.files, req.body.code);
 
-  runCommand(
-    `arduino-cli compile --fqbn ${selectedFqbn} ${SKETCH_DIR}`,
-    (error, stdout, stderr) => {
-      if (error) {
+  runArduinoCli(
+    ["compile", "--fqbn", selectedFqbn, SKETCH_DIR],
+    (code, stdout, stderr) => {
+      if (code !== 0) {
         return res.status(500).json({
           success: false,
-          error: stderr || error.message,
+          error: stderr || `arduino-cli exited with code ${code}`,
         });
       }
 
@@ -330,19 +598,26 @@ app.post("/compile", (req, res) => {
 });
 
 app.post("/upload", (req, res) => {
-  const selectedPort = req.body.port || DEFAULT_PORT;
-  const selectedFqbn = req.body.fqbn || DEFAULT_FQBN;
+  const selectedPort = requestString(req.body.port, DEFAULT_PORT);
+  const selectedFqbn = requestString(req.body.fqbn, DEFAULT_FQBN);
 
   saveSketchFiles(req.body.files, req.body.code);
 
   closeSerial(() => {
-    runCommand(
-      `arduino-cli compile --fqbn ${selectedFqbn} ${SKETCH_DIR} && arduino-cli upload -p ${selectedPort} --fqbn ${selectedFqbn} ${SKETCH_DIR}`,
-      (error, stdout, stderr) => {
-        if (error) {
+    runArduinoCliSequence(
+      [
+        ["compile", "--fqbn", selectedFqbn, SKETCH_DIR],
+        ["upload", "-p", selectedPort, "--fqbn", selectedFqbn, SKETCH_DIR],
+      ],
+      (code, stdout, stderr) => {
+        if (code !== 0) {
+          setTimeout(() => {
+            openSerial(selectedPort);
+          }, 1000);
+
           return res.status(500).json({
             success: false,
-            error: stderr || error.message,
+            error: stderr || `arduino-cli exited with code ${code}`,
           });
         }
 
@@ -361,10 +636,72 @@ app.post("/upload", (req, res) => {
   });
 });
 
+app.post("/upload-ota", (req, res) => {
+  const selectedFqbn = requestString(req.body.fqbn, DEFAULT_FQBN);
+  const otaIp = requestString(req.body.otaIp, DEFAULT_OTA_IP);
+  const otaPassword =
+    typeof req.body.otaPassword === "string"
+      ? req.body.otaPassword
+      : DEFAULT_OTA_PASSWORD;
+
+  if (!otaIp.trim()) {
+    return res.status(400).json({
+      success: false,
+      error: "ESP32 OTA IP address is required.",
+    });
+  }
+
+  saveSketchFiles(req.body.files, req.body.code);
+
+  runArduinoCliSequence(
+    [
+      ["compile", "--fqbn", selectedFqbn, SKETCH_DIR],
+      [
+        "upload",
+        "-p",
+        otaIp,
+        "--fqbn",
+        selectedFqbn,
+        "--protocol",
+        "network",
+        "--upload-field",
+        `password=${otaPassword}`,
+        SKETCH_DIR,
+      ],
+    ],
+    (code, stdout, stderr) => {
+      if (code !== 0) {
+        return res.status(500).json({
+          success: false,
+          error: stderr || `arduino-cli exited with code ${code}`,
+        });
+      }
+
+      res.json({
+        success: true,
+        output:
+          stdout +
+          `\n\nOTA upload complete. Uploaded wirelessly to ESP32 at ${otaIp}.`,
+      });
+    }
+  );
+});
+
 app.post("/serial/start", (req, res) => {
-  const selectedPort = req.body.port || DEFAULT_PORT;
-  openSerial(selectedPort);
-  res.json({ success: true, port: selectedPort });
+  const selectedPort = requestString(req.body.port, DEFAULT_PORT);
+  const selectedBaudRate = requestNumber(req.body.baudRate, DEFAULT_BAUD_RATE);
+
+  openSerial(selectedPort, selectedBaudRate);
+
+  res.json({
+    success: true,
+    port: selectedPort,
+    baudRate: selectedBaudRate,
+  });
+});
+
+app.get("/serial/status", (req, res) => {
+  res.json(getSerialStatusPayload());
 });
 
 app.post("/serial/stop", (req, res) => {
@@ -374,8 +711,7 @@ app.post("/serial/stop", (req, res) => {
 });
 
 app.get("/libs", (req, res) => {
-  runSpawnCommand(
-    "arduino-cli",
+  runArduinoCli(
     ["lib", "list", "--format", "json"],
     (code, stdout, stderr) => {
       if (code !== 0) {
@@ -397,12 +733,7 @@ app.get("/libs", (req, res) => {
             [];
 
         const cleanedLibraries = libraries.map((lib) => ({
-          name:
-            lib.name ||
-            lib.library?.name ||
-            lib.metadata?.name ||
-            lib.properties?.name ||
-            "Unknown Library",
+          name: getLibraryName(lib) || "Unknown Library",
           version:
             lib.version ||
             lib.installed_version ||
@@ -434,7 +765,7 @@ app.get("/libs", (req, res) => {
 });
 
 app.post("/libs/search", (req, res) => {
-  const query = req.body.query;
+  const query = requestString(req.body.query, "");
 
   if (!query) {
     return res.status(400).json({
@@ -443,8 +774,7 @@ app.post("/libs/search", (req, res) => {
     });
   }
 
-  runSpawnCommand(
-    "arduino-cli",
+  runArduinoCli(
     ["lib", "search", query, "--format", "json"],
     (code, stdout, stderr) => {
       if (code !== 0) {
@@ -489,9 +819,7 @@ app.post("/libs/search", (req, res) => {
 });
 
 app.post("/libs/install", (req, res) => {
-  const library = req.body.library;
-
-  console.log("[LIB INSTALL REQUEST]", library);
+  const library = requestString(req.body.library, "");
 
   if (!library) {
     return res.status(400).json({
@@ -500,15 +828,9 @@ app.post("/libs/install", (req, res) => {
     });
   }
 
-  runSpawnCommand(
-    "arduino-cli",
+  runArduinoCli(
     ["lib", "install", library],
     (code, stdout, stderr) => {
-
-      console.log("CODE:", code);
-      console.log("STDOUT:", stdout);
-      console.log("STDERR:", stderr);
-
       if (code !== 0) {
         return res.status(500).json({
           success: false,
@@ -524,8 +846,59 @@ app.post("/libs/install", (req, res) => {
   );
 });
 
-const server = app.listen(5000, () => {
-  console.log("Backend running on port 5000");
+app.post("/libs/uninstall", (req, res) => {
+  const library = requestString(req.body.library, "");
+
+  if (!library) {
+    return res.status(400).json({
+      success: false,
+      error: "Library name is required.",
+    });
+  }
+
+  runArduinoCli(
+    ["lib", "uninstall", library],
+    (code, stdout, stderr) => {
+      if (code !== 0) {
+        return res.status(500).json({
+          success: false,
+          error: stderr || `arduino-cli exited with code ${code}`,
+        });
+      }
+
+      res.json({
+        success: true,
+        output: stdout || `Removed library: ${library}`,
+      });
+    }
+  );
+});
+
+app.post("/libs/upgrade", (req, res) => {
+  const library = requestString(req.body.library, "");
+  const args = library ? ["lib", "upgrade", library] : ["lib", "upgrade"];
+
+  runArduinoCli(args, (code, stdout, stderr) => {
+    if (code !== 0) {
+      return res.status(500).json({
+        success: false,
+        error: stderr || `arduino-cli exited with code ${code}`,
+      });
+    }
+
+    res.json({
+      success: true,
+      output: stdout || (library ? `Updated library: ${library}` : "Updated libraries."),
+    });
+  });
+});
+
+const server = app.listen(SERVER_PORT, SERVER_HOST, () => {
+  console.log(`Backend running at http://${SERVER_HOST}:${SERVER_PORT}`);
+});
+
+server.on("error", (error) => {
+  console.error("Backend server error:", error.message);
 });
 
 const wss = new WebSocket.Server({ server });
@@ -533,6 +906,7 @@ const wss = new WebSocket.Server({ server });
 wss.on("connection", (ws) => {
   clients.push(ws);
   ws.send("[WebSocket connected]\n");
+  sendSerialStatus(ws);
 
   ws.on("close", () => {
     clients = clients.filter((client) => client !== ws);
