@@ -2,7 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const cors = require("cors");
-const { exec } = require("child_process");
+const { exec, spawn } = require("child_process");
 const { SerialPort } = require("serialport");
 const WebSocket = require("ws");
 
@@ -120,6 +120,65 @@ app.get("/boards", (req, res) => {
         success: false,
         error: "Could not parse board list JSON",
         raw: stdout,
+      });
+    }
+  });
+});
+
+app.get("/board-list", (req, res) => {
+  const child = spawn("arduino-cli", [
+    "board",
+    "listall",
+    "--format",
+    "json",
+  ]);
+
+  let stdout = "";
+  let stderr = "";
+
+  child.stdout.on("data", (data) => {
+    stdout += data.toString();
+  });
+
+  child.stderr.on("data", (data) => {
+    stderr += data.toString();
+  });
+
+  child.on("close", (code) => {
+    if (code !== 0) {
+      return res.status(500).json({
+        success: false,
+        error: stderr || `arduino-cli exited with code ${code}`,
+      });
+    }
+
+    try {
+      const parsed = JSON.parse(stdout);
+
+      const boards = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed.boards)
+        ? parsed.boards
+        : Array.isArray(parsed.items)
+        ? parsed.items
+        : [];
+
+      const cleanedBoards = boards
+        .filter((board) => board && board.name && board.fqbn)
+        .map((board) => ({
+          name: board.name,
+          fqbn: board.fqbn,
+        }));
+
+      res.json({
+        success: true,
+        count: cleanedBoards.length,
+        boards: cleanedBoards,
+      });
+    } catch {
+      res.status(500).json({
+        success: false,
+        error: "Could not parse board list JSON",
       });
     }
   });

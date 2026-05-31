@@ -2,30 +2,8 @@ import { useState, useEffect, useRef } from "react";
 import Editor from "@monaco-editor/react";
 import axios from "axios";
 
-const manualBoards = [
-  {
-    name: "ESP32 Dev Module",
-    fqbn: "esp32:esp32:esp32",
-  },
-  {
-    name: "DOIT ESP32 DEVKIT V1",
-    fqbn: "esp32:esp32:esp32doit-devkit-v1",
-  },
-  {
-    name: "Arduino Uno",
-    fqbn: "arduino:avr:uno",
-  },
-  {
-    name: "Arduino Nano",
-    fqbn: "arduino:avr:nano",
-  },
-  {
-    name: "Arduino Mega",
-    fqbn: "arduino:avr:mega",
-  },
-];
-
 function App() {
+  const [availableBoards, setAvailableBoards] = useState([]);
   const [output, setOutput] = useState("");
   const [serialData, setSerialData] = useState("");
   const [isSerialConnected, setIsSerialConnected] = useState(false);
@@ -49,6 +27,7 @@ void loop() {
 
   useEffect(() => {
     refreshBoards();
+    refreshBoardList();
 
     const ws = new WebSocket("ws://localhost:5000");
     wsRef.current = ws;
@@ -117,6 +96,20 @@ void loop() {
           setSelectedFqbn(first.matching_boards[0].fqbn);
         }
       }
+    } catch (err) {
+      setOutput(JSON.stringify(err.response?.data || err.message, null, 2));
+    }
+  };
+
+  const refreshBoardList = async () => {
+    try {
+      const res = await axios.get("http://localhost:5000/board-list");
+
+      const boards = Array.isArray(res.data.boards)
+        ? res.data.boards
+        : [];
+
+      setAvailableBoards(boards);
     } catch (err) {
       setOutput(JSON.stringify(err.response?.data || err.message, null, 2));
     }
@@ -218,6 +211,13 @@ void loop() {
       >
         <button onClick={refreshBoards}>Refresh Boards</button>
 
+        <button
+          onClick={refreshBoardList}
+          style={{ marginLeft: "10px" }}
+        >
+          Refresh Board List
+        </button>
+
         <select
           value={selectedPort}
           onChange={(e) => setSelectedPort(e.target.value)}
@@ -244,11 +244,18 @@ void loop() {
         <select
           value={selectedFqbn}
           onChange={(e) => setSelectedFqbn(e.target.value)}
-          style={{ marginLeft: "10px" }}
+          style={{ marginLeft: "10px", maxWidth: "320px" }}
         >
-          {manualBoards.map((board) => (
-            <option key={board.fqbn} value={board.fqbn}>
-              {board.name}
+          <option value="esp32:esp32:esp32">
+            ESP32 Dev Module
+          </option>
+
+          {availableBoards.map((board, index) => (
+            <option
+              key={`${board.fqbn}-${index}`}
+              value={board.fqbn}
+            >
+              {board.name} - {board.fqbn}
             </option>
           ))}
         </select>
