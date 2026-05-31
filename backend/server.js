@@ -11,12 +11,13 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
-const PORT = "/dev/ttyUSB0";
-const FQBN = "esp32:esp32:esp32";
+const DEFAULT_PORT = "/dev/ttyUSB0";
+const DEFAULT_FQBN = "esp32:esp32:esp32";
 const SKETCH_DIR = "./tempSketch";
 const SKETCH_FILE = path.join(SKETCH_DIR, "tempSketch.ino");
 
 let serialPort = null;
+let activeSerialPath = DEFAULT_PORT;
 let clients = [];
 
 function saveSketch(code) {
@@ -35,15 +36,17 @@ function sendToClients(data) {
   });
 }
 
-function openSerial() {
+function openSerial(portPath = DEFAULT_PORT, baudRate = 115200) {
   if (serialPort && serialPort.isOpen) {
-    sendToClients("[Serial already running]\n");
+    sendToClients(`[Serial already running on ${activeSerialPath}]\n`);
     return;
   }
 
+  activeSerialPath = portPath;
+
   serialPort = new SerialPort({
-    path: PORT,
-    baudRate: 115200,
+    path: portPath,
+    baudRate,
     autoOpen: false,
   });
 
@@ -54,7 +57,7 @@ function openSerial() {
       return;
     }
 
-    sendToClients("[Serial connected]\n");
+    sendToClients(`[Serial connected: ${portPath}]\n`);
   });
 
   serialPort.on("data", (data) => {
@@ -74,7 +77,7 @@ function closeSerial(callback) {
   if (serialPort && serialPort.isOpen) {
     serialPort.close(() => {
       serialPort = null;
-      sendToClients("\n[Serial closed for upload]\n");
+      sendToClients("\n[Serial closed]\n");
       setTimeout(callback, 1200);
     });
   } else {
@@ -83,15 +86,52 @@ function closeSerial(callback) {
   }
 }
 
+function runCommand(command, callback) {
+  exec(command, { maxBuffer: 1024 * 1024 * 10 }, callback);
+}
+
 app.get("/", (req, res) => {
   res.send("Arduino IDE Backend Running");
 });
 
+app.get("/boards", (req, res) => {
+  runCommand("arduino-cli board list --format json", (error, stdout, stderr) => {
+    if (error) {
+      return res.status(500).json({
+        success: false,
+        error: stderr || error.message,
+      });
+    }
+
+    try {
+      const parsed = JSON.parse(stdout);
+
+      const boards =
+        Array.isArray(parsed)
+          ? parsed
+          : parsed.detected_ports || parsed.ports || [];
+
+      res.json({
+        success: true,
+        boards,
+      });
+    } catch {
+      res.json({
+        success: false,
+        error: "Could not parse board list JSON",
+        raw: stdout,
+      });
+    }
+  });
+});
+
 app.post("/compile", (req, res) => {
+  const selectedFqbn = req.body.fqbn || DEFAULT_FQBN;
+
   saveSketch(req.body.code);
 
-  exec(
-    `arduino-cli compile --fqbn ${FQBN} ${SKETCH_DIR}`,
+  runCommand(
+    `arduino-cli compile --fqbn ${selectedFqbn} ${SKETCH_DIR}`,
     (error, stdout, stderr) => {
       if (error) {
         return res.status(500).json({
@@ -109,11 +149,14 @@ app.post("/compile", (req, res) => {
 });
 
 app.post("/upload", (req, res) => {
+  const selectedPort = req.body.port || DEFAULT_PORT;
+  const selectedFqbn = req.body.fqbn || DEFAULT_FQBN;
+
   saveSketch(req.body.code);
 
   closeSerial(() => {
-    exec(
-      `arduino-cli compile --fqbn ${FQBN} ${SKETCH_DIR} && arduino-cli upload -p ${PORT} --fqbn ${FQBN} ${SKETCH_DIR}`,
+    runCommand(
+      `arduino-cli compile --fqbn ${selectedFqbn} ${SKETCH_DIR} && arduino-cli upload -p ${selectedPort} --fqbn ${selectedFqbn} ${SKETCH_DIR}`,
       (error, stdout, stderr) => {
         if (error) {
           return res.status(500).json({
@@ -123,12 +166,14 @@ app.post("/upload", (req, res) => {
         }
 
         setTimeout(() => {
-          openSerial();
+          openSerial(selectedPort);
         }, 2500);
 
         res.json({
           success: true,
-          output: stdout + "\n\nUpload complete. Serial monitor restarted automatically.",
+          output:
+            stdout +
+            `\n\nUpload complete. Serial monitor restarted automatically on ${selectedPort}.`,
         });
       }
     );
@@ -136,8 +181,9 @@ app.post("/upload", (req, res) => {
 });
 
 app.post("/serial/start", (req, res) => {
-  openSerial();
-  res.json({ success: true });
+  const selectedPort = req.body.port || DEFAULT_PORT;
+  openSerial(selectedPort);
+  res.json({ success: true, port: selectedPort });
 });
 
 app.post("/serial/stop", (req, res) => {

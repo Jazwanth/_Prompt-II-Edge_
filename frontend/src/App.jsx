@@ -2,10 +2,37 @@ import { useState, useEffect, useRef } from "react";
 import Editor from "@monaco-editor/react";
 import axios from "axios";
 
+const manualBoards = [
+  {
+    name: "ESP32 Dev Module",
+    fqbn: "esp32:esp32:esp32",
+  },
+  {
+    name: "DOIT ESP32 DEVKIT V1",
+    fqbn: "esp32:esp32:esp32doit-devkit-v1",
+  },
+  {
+    name: "Arduino Uno",
+    fqbn: "arduino:avr:uno",
+  },
+  {
+    name: "Arduino Nano",
+    fqbn: "arduino:avr:nano",
+  },
+  {
+    name: "Arduino Mega",
+    fqbn: "arduino:avr:mega",
+  },
+];
+
 function App() {
   const [output, setOutput] = useState("");
   const [serialData, setSerialData] = useState("");
   const [isSerialConnected, setIsSerialConnected] = useState(false);
+
+  const [ports, setPorts] = useState([]);
+  const [selectedPort, setSelectedPort] = useState("/dev/ttyUSB0");
+  const [selectedFqbn, setSelectedFqbn] = useState("esp32:esp32:esp32");
 
   const wsRef = useRef(null);
 
@@ -21,30 +48,39 @@ void loop() {
 `);
 
   useEffect(() => {
+    refreshBoards();
+
     const ws = new WebSocket("ws://localhost:5000");
     wsRef.current = ws;
 
     ws.onopen = () => {};
 
     ws.onmessage = (event) => {
-  const message = event.data;
+      const message = event.data;
 
-  if (message.includes("[Serial connected]")) {
-    setIsSerialConnected(true);
-    return;
-  }
+      if (message.includes("[Serial connected")) {
+        setIsSerialConnected(true);
+        return;
+      }
 
-  if (message.includes("[Serial closed]")) {
-    setIsSerialConnected(false);
-    return;
-  }
+      if (
+        message.includes("[Serial closed]") ||
+        message.includes("[Serial Error]")
+      ) {
+        setIsSerialConnected(false);
+        return;
+      }
 
-  if (message.includes("[WebSocket")) {
-    return;
-  }
+      if (message.includes("[WebSocket")) {
+        return;
+      }
 
-  setSerialData((prev) => prev + message);
-};
+      if (message.includes("[Serial already running")) {
+        return;
+      }
+
+      setSerialData((prev) => prev + message);
+    };
 
     ws.onerror = () => {};
 
@@ -57,12 +93,42 @@ void loop() {
     };
   }, []);
 
+  const refreshBoards = async () => {
+    try {
+      const res = await axios.get("http://localhost:5000/boards");
+      const detected = Array.isArray(res.data.boards)
+        ? res.data.boards
+        : [];
+
+      setPorts(detected);
+
+      if (detected.length > 0) {
+        const first = detected[0];
+
+        const detectedPort =
+          first.port?.address ||
+          first.address ||
+          first.port ||
+          "/dev/ttyUSB0";
+
+        setSelectedPort(detectedPort);
+
+        if (first.matching_boards?.length > 0) {
+          setSelectedFqbn(first.matching_boards[0].fqbn);
+        }
+      }
+    } catch (err) {
+      setOutput(JSON.stringify(err.response?.data || err.message, null, 2));
+    }
+  };
+
   const compileCode = async () => {
     try {
       setOutput("Compiling...\n");
 
       const res = await axios.post("http://localhost:5000/compile", {
         code,
+        fqbn: selectedFqbn,
       });
 
       setOutput(res.data.output);
@@ -77,6 +143,8 @@ void loop() {
 
       const res = await axios.post("http://localhost:5000/upload", {
         code,
+        port: selectedPort,
+        fqbn: selectedFqbn,
       });
 
       setOutput(res.data.output);
@@ -87,8 +155,9 @@ void loop() {
 
   const connectSerial = async () => {
     try {
-      await axios.post("http://localhost:5000/serial/start");
-      setSerialData((prev) => prev + "\n[Starting serial monitor]\n");
+      await axios.post("http://localhost:5000/serial/start", {
+        port: selectedPort,
+      });
     } catch (err) {
       setSerialData(
         (prev) =>
@@ -104,7 +173,6 @@ void loop() {
     try {
       await axios.post("http://localhost:5000/serial/stop");
       setIsSerialConnected(false);
-      setSerialData((prev) => prev + "\n[Stopping serial monitor]\n");
     } catch (err) {
       setSerialData(
         (prev) =>
@@ -120,9 +188,77 @@ void loop() {
     setSerialData("");
   };
 
+  const getPortAddress = (item) => {
+    return item.port?.address || item.address || item.port || "";
+  };
+
+  const getPortLabel = (item) => {
+    const address = getPortAddress(item);
+    const protocol = item.port?.protocol || item.protocol || "serial";
+
+    const boardName =
+      item.matching_boards?.[0]?.name ||
+      item.boards?.[0]?.name ||
+      "Unknown Board";
+
+    return `${address} - ${boardName} (${protocol})`;
+  };
+
   return (
     <div style={{ padding: "20px" }}>
       <h1>Web Arduino IDE</h1>
+
+      <div
+        style={{
+          marginBottom: "15px",
+          padding: "10px",
+          background: "#f3f3f3",
+          border: "1px solid #ccc",
+        }}
+      >
+        <button onClick={refreshBoards}>Refresh Boards</button>
+
+        <select
+          value={selectedPort}
+          onChange={(e) => setSelectedPort(e.target.value)}
+          style={{ marginLeft: "10px" }}
+        >
+          <option value="/dev/ttyUSB0">/dev/ttyUSB0</option>
+          <option value="/dev/ttyUSB1">/dev/ttyUSB1</option>
+          <option value="/dev/ttyACM0">/dev/ttyACM0</option>
+          <option value="/dev/ttyACM1">/dev/ttyACM1</option>
+
+          {ports.map((item, index) => {
+            const address = getPortAddress(item);
+
+            if (!address) return null;
+
+            return (
+              <option key={`${address}-${index}`} value={address}>
+                {getPortLabel(item)}
+              </option>
+            );
+          })}
+        </select>
+
+        <select
+          value={selectedFqbn}
+          onChange={(e) => setSelectedFqbn(e.target.value)}
+          style={{ marginLeft: "10px" }}
+        >
+          {manualBoards.map((board) => (
+            <option key={board.fqbn} value={board.fqbn}>
+              {board.name}
+            </option>
+          ))}
+        </select>
+
+        <div style={{ marginTop: "8px", fontSize: "14px" }}>
+          <strong>Selected Port:</strong> {selectedPort}
+          <br />
+          <strong>Selected Board:</strong> {selectedFqbn}
+        </div>
+      </div>
 
       <Editor
         height="500px"
