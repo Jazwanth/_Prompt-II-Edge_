@@ -9,23 +9,48 @@ const WebSocket = require("ws");
 const app = express();
 
 app.use(cors());
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "5mb" }));
 
 const DEFAULT_PORT = "/dev/ttyUSB0";
 const DEFAULT_FQBN = "esp32:esp32:esp32";
 const SKETCH_DIR = "./tempSketch";
-const SKETCH_FILE = path.join(SKETCH_DIR, "tempSketch.ino");
+const MAIN_FILE = "tempSketch.ino";
 
 let serialPort = null;
 let activeSerialPath = DEFAULT_PORT;
 let clients = [];
 
-function saveSketch(code) {
-  if (!fs.existsSync(SKETCH_DIR)) {
-    fs.mkdirSync(SKETCH_DIR);
+function cleanSketchDir() {
+  if (fs.existsSync(SKETCH_DIR)) {
+    fs.rmSync(SKETCH_DIR, { recursive: true, force: true });
   }
 
-  fs.writeFileSync(SKETCH_FILE, code || "");
+  fs.mkdirSync(SKETCH_DIR);
+}
+
+function safeFileName(name) {
+  return name.replace(/[^a-zA-Z0-9_.-]/g, "_");
+}
+
+function saveSketchFiles(files, fallbackCode) {
+  cleanSketchDir();
+
+  if (Array.isArray(files) && files.length > 0) {
+    files.forEach((file) => {
+      const name = safeFileName(file.name || MAIN_FILE);
+      fs.writeFileSync(path.join(SKETCH_DIR, name), file.content || "");
+    });
+
+    const hasIno = files.some((file) => file.name?.endsWith(".ino"));
+
+    if (!hasIno) {
+      fs.writeFileSync(path.join(SKETCH_DIR, MAIN_FILE), fallbackCode || "");
+    }
+
+    return;
+  }
+
+  fs.writeFileSync(path.join(SKETCH_DIR, MAIN_FILE), fallbackCode || "");
 }
 
 function sendToClients(data) {
@@ -106,15 +131,11 @@ app.get("/boards", (req, res) => {
     try {
       const parsed = JSON.parse(stdout);
 
-      const boards =
-        Array.isArray(parsed)
-          ? parsed
-          : parsed.detected_ports || parsed.ports || [];
+      const boards = Array.isArray(parsed)
+        ? parsed
+        : parsed.detected_ports || parsed.ports || [];
 
-      res.json({
-        success: true,
-        boards,
-      });
+      res.json({ success: true, boards });
     } catch {
       res.json({
         success: false,
@@ -187,7 +208,7 @@ app.get("/board-list", (req, res) => {
 app.post("/compile", (req, res) => {
   const selectedFqbn = req.body.fqbn || DEFAULT_FQBN;
 
-  saveSketch(req.body.code);
+  saveSketchFiles(req.body.files, req.body.code);
 
   runCommand(
     `arduino-cli compile --fqbn ${selectedFqbn} ${SKETCH_DIR}`,
@@ -211,7 +232,7 @@ app.post("/upload", (req, res) => {
   const selectedPort = req.body.port || DEFAULT_PORT;
   const selectedFqbn = req.body.fqbn || DEFAULT_FQBN;
 
-  saveSketch(req.body.code);
+  saveSketchFiles(req.body.files, req.body.code);
 
   closeSerial(() => {
     runCommand(
