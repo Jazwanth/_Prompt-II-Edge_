@@ -41,7 +41,6 @@ void loop() {
 
 const PROJECTS_KEY = "webArduinoIDE_projects";
 const AUTOSAVE_KEY = "webArduinoIDE_autosave_tabs";
-const DASHBOARD_CONFIG_KEY = "webArduinoIDE_dashboard_config";
 const MAIN_FILE = "tempSketch.ino";
 const AUTOSAVE_DELAY_MS = 500;
 const MAX_SERIAL_CHARS = 30000;
@@ -75,6 +74,36 @@ const PLOT_COLORS = [
   "#be123c",
   "#4f46e5",
 ];
+
+const PLOTTER_IGNORED_LINE_PATTERNS = [
+  /^ets\s/i,
+  /^rst:/i,
+  /^configsip:/i,
+  /^clk_drv:/i,
+  /^mode:/i,
+  /^load:0x/i,
+  /^entry\s/i,
+  /^ho\s/i,
+  /^connecting to wifi/i,
+  /^ip address:/i,
+  /^ota ready/i,
+  /^\.+$/,
+];
+
+const PLOTTER_IGNORED_METRICS = new Set([
+  "rst",
+  "boot",
+  "configsip",
+  "spiwp",
+  "clk_drv",
+  "q_drv",
+  "d_drv",
+  "cs0_drv",
+  "hd_drv",
+  "wp_drv",
+  "clock div",
+  "entry",
+]);
 
 function createDefaultFiles() {
   return DEFAULT_FILES.map((file) => ({ ...file }));
@@ -153,19 +182,6 @@ function readStoredProjects() {
   }
 }
 
-function readDashboardConfig() {
-  try {
-    const raw = localStorage.getItem(DASHBOARD_CONFIG_KEY);
-    const parsed = raw ? JSON.parse(raw) : {};
-
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed
-      : {};
-  } catch {
-    return {};
-  }
-}
-
 function formatApiError(err) {
   const data = err.response?.data;
 
@@ -178,6 +194,9 @@ function formatApiError(err) {
 function parseSerialMetrics(line) {
   const trimmed = line.trim();
   if (!trimmed) return [];
+  if (PLOTTER_IGNORED_LINE_PATTERNS.some((pattern) => pattern.test(trimmed))) {
+    return [];
+  }
 
   if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
     try {
@@ -195,13 +214,21 @@ function parseSerialMetrics(line) {
   }
 
   const namedValues = [];
-  const pairPattern = /([a-zA-Z_][\w .-]*)\s*[:=]\s*(-?\d+(?:\.\d+)?)/g;
+  const pairPattern =
+    /(^|[,;\s])([a-zA-Z_][\w .-]{0,32})\s*[:=]\s*(-?(?:\d+\.?\d*|\.\d+))(?![a-zA-Z0-9_.-])/g;
   let match = pairPattern.exec(trimmed);
 
   while (match) {
+    const name = match[2].trim().replace(/\s+/g, " ");
+
+    if (PLOTTER_IGNORED_METRICS.has(name.toLowerCase())) {
+      match = pairPattern.exec(trimmed);
+      continue;
+    }
+
     namedValues.push({
-      name: match[1].trim().replace(/\s+/g, " "),
-      value: Number(match[2]),
+      name,
+      value: Number(match[3]),
     });
     match = pairPattern.exec(trimmed);
   }
@@ -217,21 +244,6 @@ function parseSerialMetrics(line) {
   }
 
   return [];
-}
-
-function clampPercent(value) {
-  return Math.max(0, Math.min(100, value));
-}
-
-function getMetricRange(config) {
-  const min = Number(config?.min);
-  const max = Number(config?.max);
-
-  if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) {
-    return null;
-  }
-
-  return { min, max };
 }
 
 const CodeEditor = memo(function CodeEditor({ fileName, code, onChange }) {
@@ -253,14 +265,10 @@ const SerialConsole = memo(function SerialConsole({ selectedPort }) {
   const [isSerialConnected, setIsSerialConnected] = useState(false);
   const [baudRate, setBaudRate] = useState(DEFAULT_BAUD_RATE);
   const [plotRows, setPlotRows] = useState([]);
-  const [latestMetrics, setLatestMetrics] = useState({});
-  const [dashboardConfig, setDashboardConfig] = useState(readDashboardConfig);
-  const [selectedMetric, setSelectedMetric] = useState("");
 
   const pointCounterRef = useRef(0);
   const serialBufferRef = useRef("");
   const plotBufferRef = useRef([]);
-  const latestMetricsBufferRef = useRef({});
   const serialLineBufferRef = useRef("");
   const flushTimerRef = useRef(null);
 
@@ -269,11 +277,9 @@ const SerialConsole = memo(function SerialConsole({ selectedPort }) {
 
     const serialChunk = serialBufferRef.current;
     const plotChunk = plotBufferRef.current;
-    const latestChunk = latestMetricsBufferRef.current;
 
     serialBufferRef.current = "";
     plotBufferRef.current = [];
-    latestMetricsBufferRef.current = {};
 
     if (serialChunk) {
       setSerialData((prev) => (prev + serialChunk).slice(-MAX_SERIAL_CHARS));
@@ -283,13 +289,6 @@ const SerialConsole = memo(function SerialConsole({ selectedPort }) {
       setPlotRows((prev) =>
         [...prev, ...plotChunk].slice(-MAX_PLOT_POINTS)
       );
-    }
-
-    if (Object.keys(latestChunk).length > 0) {
-      setLatestMetrics((prev) => ({
-        ...prev,
-        ...latestChunk,
-      }));
     }
   }, []);
 
@@ -324,7 +323,6 @@ const SerialConsole = memo(function SerialConsole({ selectedPort }) {
         const values = {};
         metrics.forEach((metric) => {
           values[metric.name] = metric.value;
-          latestMetricsBufferRef.current[metric.name] = metric.value;
         });
 
         nextPoints.push({
@@ -447,23 +445,17 @@ const SerialConsole = memo(function SerialConsole({ selectedPort }) {
 
   const clearPlot = useCallback(() => {
     plotBufferRef.current = [];
-    latestMetricsBufferRef.current = {};
     pointCounterRef.current = 0;
     setPlotRows([]);
-    setLatestMetrics({});
   }, []);
-
-  useEffect(() => {
-    localStorage.setItem(
-      DASHBOARD_CONFIG_KEY,
-      JSON.stringify(dashboardConfig)
-    );
-  }, [dashboardConfig]);
 
   const plotData = useMemo(
     () => {
       const seriesNames = Array.from(
         new Set(plotRows.flatMap((row) => Object.keys(row.values)))
+      ).filter(
+        (seriesName) =>
+          !PLOTTER_IGNORED_METRICS.has(seriesName.toLowerCase())
       );
 
       return {
@@ -480,37 +472,6 @@ const SerialConsole = memo(function SerialConsole({ selectedPort }) {
     },
     [plotRows]
   );
-
-  const latestMetricEntries = Object.entries(latestMetrics);
-  const selectedDashboardMetric =
-    selectedMetric && latestMetrics[selectedMetric] !== undefined
-      ? selectedMetric
-      : latestMetricEntries[0]?.[0] || "";
-
-  const selectedDashboardConfig =
-    dashboardConfig[selectedDashboardMetric] || {};
-
-  const updateDashboardMetricConfig = useCallback((metricName, patch) => {
-    if (!metricName) return;
-
-    setDashboardConfig((prev) => ({
-      ...prev,
-      [metricName]: {
-        ...prev[metricName],
-        ...patch,
-      },
-    }));
-  }, []);
-
-  const resetDashboardMetricConfig = useCallback((metricName) => {
-    if (!metricName) return;
-
-    setDashboardConfig((prev) => {
-      const nextConfig = { ...prev };
-      delete nextConfig[metricName];
-      return nextConfig;
-    });
-  }, []);
 
   return (
     <>
@@ -557,164 +518,6 @@ const SerialConsole = memo(function SerialConsole({ selectedPort }) {
 
       <div style={{ height: "300px", background: "#fff", border: "1px solid #ccc", padding: "10px" }}>
         <Line data={plotData} options={PLOT_OPTIONS} />
-      </div>
-
-      <h3>Circuit Dashboard</h3>
-
-      {latestMetricEntries.length > 0 && (
-        <div
-          style={{
-            marginBottom: "10px",
-            padding: "10px",
-            background: "#f8fafc",
-            border: "1px solid #d8dee9",
-            textAlign: "left",
-          }}
-        >
-          <select
-            value={selectedDashboardMetric}
-            onChange={(event) => setSelectedMetric(event.target.value)}
-          >
-            {latestMetricEntries.map(([name]) => (
-              <option key={name} value={name}>
-                {name}
-              </option>
-            ))}
-          </select>
-
-          <input
-            value={selectedDashboardConfig.unit || ""}
-            onChange={(event) =>
-              updateDashboardMetricConfig(selectedDashboardMetric, {
-                unit: event.target.value,
-              })
-            }
-            placeholder="unit"
-            style={{ marginLeft: "10px", padding: "5px", width: "80px" }}
-          />
-
-          <input
-            type="number"
-            value={selectedDashboardConfig.min ?? ""}
-            onChange={(event) =>
-              updateDashboardMetricConfig(selectedDashboardMetric, {
-                min: event.target.value,
-              })
-            }
-            placeholder="min"
-            style={{ marginLeft: "10px", padding: "5px", width: "80px" }}
-          />
-
-          <input
-            type="number"
-            value={selectedDashboardConfig.max ?? ""}
-            onChange={(event) =>
-              updateDashboardMetricConfig(selectedDashboardMetric, {
-                max: event.target.value,
-              })
-            }
-            placeholder="max"
-            style={{ marginLeft: "10px", padding: "5px", width: "80px" }}
-          />
-
-          <button
-            onClick={() => resetDashboardMetricConfig(selectedDashboardMetric)}
-            style={{ marginLeft: "10px" }}
-          >
-            Reset Widget
-          </button>
-        </div>
-      )}
-
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
-          gap: "10px",
-          textAlign: "left",
-        }}
-      >
-        {latestMetricEntries.length > 0 ? (
-          latestMetricEntries.map(([name, value]) => {
-            const config = dashboardConfig[name] || {};
-            const range = getMetricRange(config);
-            const isBinary = value === 0 || value === 1;
-            const percent = range
-              ? clampPercent(((value - range.min) / (range.max - range.min)) * 100)
-              : null;
-
-            return (
-              <div
-                key={name}
-                style={{
-                  background: "#f8fafc",
-                  border: "1px solid #d8dee9",
-                  padding: "10px",
-                }}
-              >
-                <strong>{name}</strong>
-
-                <div style={{ fontSize: "24px", color: "#111827" }}>
-                  {value}
-                  {config.unit && (
-                    <span style={{ fontSize: "14px", marginLeft: "4px" }}>
-                      {config.unit}
-                    </span>
-                  )}
-                </div>
-
-                {isBinary && (
-                  <div style={{ marginTop: "8px" }}>
-                    <span
-                      style={{
-                        display: "inline-block",
-                        width: "12px",
-                        height: "12px",
-                        borderRadius: "50%",
-                        marginRight: "6px",
-                        background: value ? "#16a34a" : "#94a3b8",
-                      }}
-                    />
-                    {value ? "ON" : "OFF"}
-                  </div>
-                )}
-
-                {range && (
-                  <div style={{ marginTop: "8px" }}>
-                    <div
-                      style={{
-                        height: "8px",
-                        background: "#e5e7eb",
-                        overflow: "hidden",
-                      }}
-                    >
-                      <div
-                        style={{
-                          height: "100%",
-                          width: `${percent}%`,
-                          background: "#2563eb",
-                        }}
-                      />
-                    </div>
-                    <small>
-                      {range.min} to {range.max}
-                    </small>
-                  </div>
-                )}
-              </div>
-            );
-          })
-        ) : (
-          <div
-            style={{
-              background: "#f8fafc",
-              border: "1px solid #d8dee9",
-              padding: "10px",
-            }}
-          >
-            Waiting for serial values
-          </div>
-        )}
       </div>
     </>
   );
@@ -1785,7 +1588,7 @@ function App() {
         <div className="panel-heading">
           <div>
             <p className="eyebrow">Live Tools</p>
-            <h2>Serial Monitor / Plotter / Dashboard</h2>
+            <h2>Serial Monitor / Plotter</h2>
           </div>
         </div>
 
