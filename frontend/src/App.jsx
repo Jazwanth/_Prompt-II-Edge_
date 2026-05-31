@@ -25,6 +25,21 @@ ChartJS.register(
   Legend
 );
 
+const DEFAULT_CODE = `
+void setup() {
+  Serial.begin(115200);
+}
+
+void loop() {
+  int value = random(0, 100);
+  Serial.println(value);
+  delay(500);
+}
+`;
+
+const PROJECTS_KEY = "webArduinoIDE_projects";
+const AUTOSAVE_KEY = "webArduinoIDE_autosave";
+
 function App() {
   const [availableBoards, setAvailableBoards] = useState([]);
   const [output, setOutput] = useState("");
@@ -38,22 +53,20 @@ function App() {
   const [plotLabels, setPlotLabels] = useState([]);
   const [plotValues, setPlotValues] = useState([]);
 
+  const [projectName, setProjectName] = useState("Untitled");
+  const [savedProjects, setSavedProjects] = useState([]);
+  const [selectedProject, setSelectedProject] = useState("");
+
   const wsRef = useRef(null);
   const pointCounterRef = useRef(0);
 
-  const [code, setCode] = useState(`
-void setup() {
-  Serial.begin(115200);
-}
-
-void loop() {
-  int value = random(0, 100);
-  Serial.println(value);
-  delay(500);
-}
-`);
+  const [code, setCode] = useState(() => {
+    const autosaved = localStorage.getItem(AUTOSAVE_KEY);
+    return autosaved || DEFAULT_CODE;
+  });
 
   useEffect(() => {
+    loadProjectList();
     refreshBoards();
     refreshBoardList();
 
@@ -95,6 +108,103 @@ void loop() {
       ws.close();
     };
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem(AUTOSAVE_KEY, code);
+  }, [code]);
+
+  const loadProjectList = () => {
+    const raw = localStorage.getItem(PROJECTS_KEY);
+    const projects = raw ? JSON.parse(raw) : {};
+    setSavedProjects(Object.keys(projects));
+  };
+
+  const getProjects = () => {
+    const raw = localStorage.getItem(PROJECTS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  };
+
+  const saveProject = () => {
+    const name = projectName.trim();
+
+    if (!name) {
+      setOutput("Project name cannot be empty.");
+      return;
+    }
+
+    const projects = getProjects();
+
+    projects[name] = {
+      code,
+      selectedPort,
+      selectedFqbn,
+      updatedAt: new Date().toISOString(),
+    };
+
+    localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
+    setSelectedProject(name);
+    loadProjectList();
+
+    setOutput(`Project "${name}" saved successfully.`);
+  };
+
+  const openProject = (name) => {
+    if (!name) return;
+
+    const projects = getProjects();
+    const project = projects[name];
+
+    if (!project) {
+      setOutput(`Project "${name}" not found.`);
+      return;
+    }
+
+    setProjectName(name);
+    setSelectedProject(name);
+    setCode(project.code || DEFAULT_CODE);
+
+    if (project.selectedPort) {
+      setSelectedPort(project.selectedPort);
+    }
+
+    if (project.selectedFqbn) {
+      setSelectedFqbn(project.selectedFqbn);
+    }
+
+    setOutput(`Project "${name}" opened.`);
+  };
+
+  const deleteProject = () => {
+    const name = selectedProject || projectName.trim();
+
+    if (!name) {
+      setOutput("No project selected to delete.");
+      return;
+    }
+
+    const projects = getProjects();
+
+    if (!projects[name]) {
+      setOutput(`Project "${name}" not found.`);
+      return;
+    }
+
+    delete projects[name];
+
+    localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
+
+    setSelectedProject("");
+    loadProjectList();
+
+    setOutput(`Project "${name}" deleted.`);
+  };
+
+  const newProject = () => {
+    setProjectName("Untitled");
+    setSelectedProject("");
+    setCode(DEFAULT_CODE);
+    setOutput("New project created.");
+  };
 
   const handlePlotData = (message) => {
     const lines = message.split(/\r?\n/);
@@ -279,6 +389,49 @@ void loop() {
   return (
     <div style={{ padding: "20px" }}>
       <h1>Web Arduino IDE</h1>
+
+      <div
+        style={{
+          marginBottom: "15px",
+          padding: "10px",
+          background: "#e9f5ff",
+          border: "1px solid #9bc9ee",
+        }}
+      >
+        <h3>Project</h3>
+
+        <input
+          value={projectName}
+          onChange={(e) => setProjectName(e.target.value)}
+          placeholder="Project name"
+          style={{ padding: "5px", width: "220px" }}
+        />
+
+        <button onClick={newProject} style={{ marginLeft: "10px" }}>
+          New Project
+        </button>
+
+        <button onClick={saveProject} style={{ marginLeft: "10px" }}>
+          Save Project
+        </button>
+
+        <select
+          value={selectedProject}
+          onChange={(e) => openProject(e.target.value)}
+          style={{ marginLeft: "10px" }}
+        >
+          <option value="">Open Saved Project</option>
+          {savedProjects.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
+
+        <button onClick={deleteProject} style={{ marginLeft: "10px" }}>
+          Delete Project
+        </button>
+      </div>
 
       <div
         style={{
