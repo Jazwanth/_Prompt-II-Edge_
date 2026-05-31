@@ -62,6 +62,24 @@ const PLOT_OPTIONS = {
   responsive: true,
   animation: false,
   maintainAspectRatio: false,
+  plugins: {
+    legend: {
+      labels: {
+        color: "#cbd5e1",
+        boxWidth: 12,
+      },
+    },
+  },
+  scales: {
+    x: {
+      grid: { color: "rgba(148, 163, 184, 0.14)" },
+      ticks: { color: "#94a3b8" },
+    },
+    y: {
+      grid: { color: "rgba(148, 163, 184, 0.14)" },
+      ticks: { color: "#94a3b8" },
+    },
+  },
 };
 
 const PLOT_COLORS = [
@@ -249,7 +267,7 @@ function parseSerialMetrics(line) {
 const CodeEditor = memo(function CodeEditor({ fileName, code, onChange }) {
   return (
     <Editor
-      height="500px"
+      height="100%"
       defaultLanguage="cpp"
       path={fileName}
       theme="vs-dark"
@@ -260,7 +278,7 @@ const CodeEditor = memo(function CodeEditor({ fileName, code, onChange }) {
   );
 });
 
-const SerialConsole = memo(function SerialConsole({ selectedPort }) {
+const SerialConsole = memo(function SerialConsole({ selectedPort, activeView }) {
   const [serialData, setSerialData] = useState("");
   const [isSerialConnected, setIsSerialConnected] = useState(false);
   const [baudRate, setBaudRate] = useState(DEFAULT_BAUD_RATE);
@@ -474,12 +492,12 @@ const SerialConsole = memo(function SerialConsole({ selectedPort }) {
   );
 
   return (
-    <>
-      <div style={{ marginTop: "15px" }}>
+    <div className="serial-tool">
+      <div className="serial-toolbar">
         <select
           value={baudRate}
           onChange={(event) => setBaudRate(Number(event.target.value))}
-          style={{ marginRight: "10px" }}
+          aria-label="Serial baud rate"
         >
           {SERIAL_BAUD_RATES.map((rate) => (
             <option key={rate} value={rate}>
@@ -490,36 +508,39 @@ const SerialConsole = memo(function SerialConsole({ selectedPort }) {
 
         <button onClick={connectSerial}>Connect Serial</button>
 
-        <button onClick={disconnectSerial} style={{ marginLeft: "10px" }}>
+        <button onClick={disconnectSerial}>
           Disconnect Serial
         </button>
 
-        <button onClick={clearSerial} style={{ marginLeft: "10px" }}>
+        <button onClick={clearSerial}>
           Clear Serial
         </button>
 
-        <button onClick={clearPlot} style={{ marginLeft: "10px" }}>
+        <button onClick={clearPlot}>
           Clear Plot
         </button>
-      </div>
 
-      <h3>
-        Serial Monitor:{" "}
-        <span style={{ color: isSerialConnected ? "green" : "red" }}>
-          {isSerialConnected ? "Connected" : "Disconnected"}
+        <span
+          className={
+            isSerialConnected
+              ? "status-pill status-pill-success"
+              : "status-pill status-pill-danger"
+          }
+        >
+          Serial {isSerialConnected ? "Connected" : "Disconnected"}
         </span>
-      </h3>
-
-      <div style={{ background: "#111", color: "#00ff00", padding: "10px", height: "220px", overflow: "auto", marginTop: "20px", border: "1px solid #333" }}>
-        <pre>{serialData}</pre>
       </div>
 
-      <h3>Serial Plotter</h3>
-
-      <div style={{ height: "300px", background: "#fff", border: "1px solid #ccc", padding: "10px" }}>
-        <Line data={plotData} options={PLOT_OPTIONS} />
+      <div className="serial-content">
+        {activeView === "plotter" ? (
+          <div className="plotter-frame">
+            <Line data={plotData} options={PLOT_OPTIONS} />
+          </div>
+        ) : (
+          <pre className="serial-monitor">{serialData}</pre>
+        )}
       </div>
-    </>
+    </div>
   );
 });
 
@@ -592,6 +613,8 @@ function App() {
   const [uploadMode, setUploadMode] = useState("usb");
   const [otaIp, setOtaIp] = useState("192.168.1.100");
   const [otaPassword, setOtaPassword] = useState("");
+  const [activeRightTab, setActiveRightTab] = useState("board");
+  const [activeDockTab, setActiveDockTab] = useState("output");
 
   const [files, setFiles] = useState(readStoredFiles);
 
@@ -1244,15 +1267,84 @@ function App() {
     [availableBoards]
   );
 
+  const selectedBoardName =
+    availableBoards.find((board) => board.fqbn === selectedFqbn)?.name ||
+    selectedFqbn;
+
+  const rightTabs = [
+    { id: "assistant", label: "AI" },
+    { id: "board", label: "Board" },
+    { id: "libraries", label: "Libraries" },
+    { id: "wiring", label: "Wiring" },
+  ];
+
+  const dockTabs = [
+    { id: "output", label: "Output" },
+    { id: "serial", label: "Serial" },
+    { id: "plotter", label: "Plotter" },
+    { id: "logs", label: "Logs" },
+  ];
+
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Web Arduino IDE</p>
-          <h1>Prompt II Edge</h1>
+    <div className="ide-shell">
+      <header className="command-bar glass-panel">
+        <div className="project-identity">
+          <div className="brand-mark">PE</div>
+
+          <label className="project-title-field">
+            <span>Prompt II Edge</span>
+            <input
+              value={projectName}
+              onChange={(e) => setProjectName(e.target.value)}
+              placeholder="Project name"
+              aria-label="Project name"
+              className="project-title-input"
+            />
+          </label>
         </div>
 
-        <div className="topbar-actions">
+        <div className="command-selects">
+          <label className="compact-field">
+            <span>Board</span>
+            <select
+              value={selectedFqbn}
+              onChange={(e) => setSelectedFqbn(e.target.value)}
+              aria-label="Board"
+              className="board-select"
+            >
+              <option value="esp32:esp32:esp32">ESP32 Dev Module</option>
+
+              {boardOptions}
+            </select>
+          </label>
+
+          <label className="compact-field compact-field-port">
+            <span>Port</span>
+            <select
+              value={selectedPort}
+              onChange={(e) => setSelectedPort(e.target.value)}
+              aria-label="Serial port"
+            >
+              <option value="/dev/ttyUSB0">/dev/ttyUSB0</option>
+              <option value="/dev/ttyUSB1">/dev/ttyUSB1</option>
+              <option value="/dev/ttyACM0">/dev/ttyACM0</option>
+              <option value="/dev/ttyACM1">/dev/ttyACM1</option>
+
+              {portOptions}
+            </select>
+          </label>
+        </div>
+
+        <div className="command-status">
+          <span className="status-pill status-pill-info">
+            Board {selectedBoardName}
+          </span>
+          <span className="status-pill status-pill-info">Port {selectedPort}</span>
+        </div>
+
+        <div className="command-actions">
+          <button onClick={refreshBoards}>Refresh</button>
+
           <button className="primary-action" onClick={compileCode}>
             Compile
           </button>
@@ -1261,16 +1353,13 @@ function App() {
             value={uploadMode}
             onChange={(e) => setUploadMode(e.target.value)}
             aria-label="Upload mode"
+            className="upload-mode-select"
           >
-            <option value="usb">USB Upload</option>
-            <option value="ota">ESP32 OTA Upload</option>
+            <option value="usb">USB</option>
+            <option value="ota">OTA</option>
           </select>
 
-          {uploadMode === "usb" ? (
-            <button className="primary-action" onClick={uploadCode}>
-              Upload USB
-            </button>
-          ) : (
+          {uploadMode === "ota" && (
             <>
               <input
                 value={otaIp}
@@ -1286,313 +1375,446 @@ function App() {
                 className="ota-input"
                 type="password"
               />
-
-              <button className="primary-action" onClick={uploadOtaCode}>
-                Upload OTA
-              </button>
             </>
           )}
+
+          <button
+            className="primary-action"
+            onClick={uploadMode === "usb" ? uploadCode : uploadOtaCode}
+          >
+            {uploadMode === "usb" ? "Upload" : "Upload OTA"}
+          </button>
         </div>
       </header>
 
-      <section className="project-bar">
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".ino,.cpp,.c,.h,.hpp,.txt"
-          className="hidden-input"
-          onChange={importFile}
-        />
+      <main className="ide-main">
+        <aside className="left-sidebar glass-panel">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".ino,.cpp,.c,.h,.hpp,.txt"
+            className="hidden-input"
+            onChange={importFile}
+          />
 
-        <input
-          value={projectName}
-          onChange={(e) => setProjectName(e.target.value)}
-          placeholder="Project name"
-          className="project-name-input"
-        />
-
-        <button onClick={newProject}>New Project</button>
-
-        <button onClick={saveProject}>Save Project</button>
-
-        <button onClick={exportCurrentFile}>
-          Export Current File
-        </button>
-
-        <button onClick={() => fileInputRef.current?.click()}>
-          Import File
-        </button>
-
-        <select
-          value={selectedProject}
-          onChange={(e) => openProject(e.target.value)}
-        >
-          <option value="">Open Saved Project</option>
-          {savedProjectOptions}
-        </select>
-
-        <button className="danger-action" onClick={deleteProject}>
-          Delete
-        </button>
-      </section>
-
-      <section className="connection-bar">
-        <button onClick={refreshBoards}>Refresh Boards</button>
-
-        <button onClick={refreshBoardList}>
-          Refresh Board List
-        </button>
-
-        <select
-          value={selectedPort}
-          onChange={(e) => setSelectedPort(e.target.value)}
-          aria-label="Serial port"
-        >
-          <option value="/dev/ttyUSB0">/dev/ttyUSB0</option>
-          <option value="/dev/ttyUSB1">/dev/ttyUSB1</option>
-          <option value="/dev/ttyACM0">/dev/ttyACM0</option>
-          <option value="/dev/ttyACM1">/dev/ttyACM1</option>
-
-          {portOptions}
-        </select>
-
-        <select
-          value={selectedFqbn}
-          onChange={(e) => setSelectedFqbn(e.target.value)}
-          aria-label="Board"
-          className="board-select"
-        >
-          <option value="esp32:esp32:esp32">ESP32 Dev Module</option>
-
-          {boardOptions}
-        </select>
-
-        <span className="status-chip">{selectedPort}</span>
-        <span className="status-chip">{selectedFqbn}</span>
-      </section>
-
-      <main className="workspace-grid">
-        <aside className="panel file-panel">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Sketch</p>
-              <h2>Files</h2>
+          <section className="sidebar-section">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Project</p>
+                <h2>Actions</h2>
+              </div>
             </div>
-          </div>
 
-          <div className="file-list">
-            {files.map((file) => (
-              <button
-                key={file.name}
-                onClick={() => setActiveFile(file.name)}
-                className={activeFile === file.name ? "file-tab active" : "file-tab"}
-              >
-                {file.name}
+            <div className="action-grid">
+              <button onClick={newProject}>New</button>
+              <button onClick={saveProject}>Save</button>
+              <button onClick={exportCurrentFile}>Export .ino</button>
+              <button onClick={() => fileInputRef.current?.click()}>
+                Import .ino
               </button>
-            ))}
-          </div>
+            </div>
 
-          <div className="button-row">
-            <button onClick={addFile}>Add File</button>
-            <button className="danger-action" onClick={deleteFile}>
-              Delete File
+            <select
+              value={selectedProject}
+              onChange={(e) => openProject(e.target.value)}
+              aria-label="Open saved project"
+            >
+              <option value="">Open Saved Project</option>
+              {savedProjectOptions}
+            </select>
+
+            <button className="danger-action" onClick={deleteProject}>
+              Delete Project
             </button>
-          </div>
+          </section>
+
+          <section className="sidebar-section sidebar-section-fill">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Sketch</p>
+                <h2>Files</h2>
+              </div>
+            </div>
+
+            <div className="file-list">
+              {files.map((file) => (
+                <button
+                  key={file.name}
+                  onClick={() => setActiveFile(file.name)}
+                  className={
+                    activeFile === file.name ? "file-tab active" : "file-tab"
+                  }
+                >
+                  <span>{file.name}</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="button-row">
+              <button onClick={addFile}>Add File</button>
+              <button className="danger-action" onClick={deleteFile}>
+                Delete File
+              </button>
+            </div>
+          </section>
         </aside>
 
-        <section className="panel editor-panel">
-          <div className="panel-heading">
+        <section className="editor-workspace glass-panel">
+          <div className="editor-header">
             <div>
               <p className="eyebrow">Active File</p>
               <h2>{activeFile}</h2>
             </div>
+
+            <span className="status-pill status-pill-muted">
+              {files.length} file{files.length === 1 ? "" : "s"}
+            </span>
           </div>
 
-          <CodeEditor
-            fileName={activeFile}
-            code={currentCode}
-            onChange={updateCurrentFile}
-          />
-
-          <div className="output-panel">
-            <div className="panel-heading compact-heading">
-              <h2>Compiler / Upload Output</h2>
-            </div>
-
-            <pre className="console-output">{output}</pre>
+          <div className="editor-frame">
+            <CodeEditor
+              fileName={activeFile}
+              code={currentCode}
+              onChange={updateCurrentFile}
+            />
           </div>
         </section>
+
+        <aside className="right-sidebar glass-panel">
+          <div className="right-tabs">
+            {rightTabs.map((tab) => (
+              <button
+                key={tab.id}
+                className={activeRightTab === tab.id ? "active" : ""}
+                onClick={() => setActiveRightTab(tab.id)}
+                aria-pressed={activeRightTab === tab.id}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="right-content">
+            {activeRightTab === "assistant" && (
+              <div className="tool-stack">
+                <section className="tool-section assistant-section">
+                  <div className="section-heading">
+                    <div>
+                      <p className="eyebrow">Assistant</p>
+                      <h2>AI</h2>
+                    </div>
+                  </div>
+
+                  <div className="assistant-feed">
+                    <div className="assistant-message">No active chat.</div>
+                  </div>
+
+                  <textarea
+                    placeholder="Ask about this sketch"
+                    aria-label="AI assistant input"
+                    className="assistant-input"
+                  />
+
+                  <button disabled>Ask</button>
+                </section>
+              </div>
+            )}
+
+            {activeRightTab === "board" && (
+              <div className="tool-stack">
+                <section className="tool-section">
+                  <div className="section-heading">
+                    <div>
+                      <p className="eyebrow">Selected</p>
+                      <h2>Board Info</h2>
+                    </div>
+                  </div>
+
+                  <dl className="meta-list">
+                    <div>
+                      <dt>Board</dt>
+                      <dd>{selectedFqbn}</dd>
+                    </div>
+                    <div>
+                      <dt>Port</dt>
+                      <dd>{selectedPort}</dd>
+                    </div>
+                  </dl>
+                </section>
+
+                <section className="tool-section">
+                  <div className="button-row">
+                    <button onClick={refreshBoards}>Refresh Ports</button>
+                    <button onClick={refreshBoardList}>Refresh Boards</button>
+                    <button onClick={refreshCores}>Refresh Cores</button>
+                  </div>
+
+                  <div className="button-row">
+                    <button onClick={updateCoreIndex}>Update Index</button>
+                    <button onClick={() => updateCore()}>Update All</button>
+                  </div>
+                </section>
+
+                <section className="tool-section">
+                  <div className="search-row">
+                    <input
+                      value={coreSearchQuery}
+                      onChange={(e) => setCoreSearchQuery(e.target.value)}
+                      placeholder="Search core, example: esp8266"
+                    />
+
+                    <button onClick={searchCores}>Search</button>
+                  </div>
+
+                  <div className="search-row">
+                    <input
+                      value={coreToInstall}
+                      onChange={(e) => setCoreToInstall(e.target.value)}
+                      placeholder="example: arduino:avr"
+                    />
+
+                    <button onClick={() => installCore()}>Install</button>
+                  </div>
+                </section>
+
+                <section className="tool-section">
+                  <h3>Core Results</h3>
+
+                  <div className="result-list">
+                    {coreSearchResults.map((core, index) => {
+                      const coreId = getCoreInstallId(core);
+
+                      return (
+                        <div className="result-item" key={`${coreId}-${index}`}>
+                          <strong>{coreId}</strong>{" "}
+                          {core.version && `v${core.version}`}
+                          <small>{core.name}</small>
+
+                          <button onClick={() => installCore(coreId)}>
+                            Install
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+
+                <section className="tool-section">
+                  <h3>Installed Cores</h3>
+
+                  <ul className="installed-list">
+                    {installedCores.map((core, index) => {
+                      const coreId = getCoreInstallId(core) || getCoreLabel(core);
+
+                      return (
+                        <li key={`${coreId}-${index}`}>
+                          <span>
+                            {getCoreLabel(core)} {getCoreVersion(core)}
+                          </span>
+
+                          <div>
+                            <button onClick={() => updateCore(coreId)}>
+                              Update
+                            </button>
+                            <button
+                              className="danger-action"
+                              onClick={() => uninstallCore(coreId)}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </section>
+              </div>
+            )}
+
+            {activeRightTab === "libraries" && (
+              <div className="tool-stack">
+                <section className="tool-section">
+                  <div className="section-heading">
+                    <div>
+                      <p className="eyebrow">Arduino CLI</p>
+                      <h2>Libraries</h2>
+                    </div>
+                  </div>
+
+                  <div className="button-row">
+                    <button onClick={refreshLibraries}>Refresh</button>
+                    <button onClick={() => updateLibrary()}>Update All</button>
+                  </div>
+
+                  <div className="search-row">
+                    <input
+                      value={librarySearchQuery}
+                      onChange={(e) => setLibrarySearchQuery(e.target.value)}
+                      placeholder="Search library, example: wifi"
+                    />
+
+                    <button onClick={searchLibraries}>Search</button>
+                  </div>
+                </section>
+
+                <section className="tool-section">
+                  <h3>Search Results</h3>
+
+                  <div className="result-list">
+                    {librarySearchResults.map((lib, index) => (
+                      <div className="result-item" key={`${lib.name}-${index}`}>
+                        <strong>
+                          {lib.name} {lib.version && `v${lib.version}`}
+                        </strong>
+                        <small>{lib.sentence}</small>
+                        <small>
+                          {lib.author} | {lib.category}
+                        </small>
+
+                        {lib.includes?.length > 0 && (
+                          <small>Includes: {lib.includes.join(", ")}</small>
+                        )}
+
+                        <div className="button-row">
+                          <button onClick={() => installLibrary(lib.name)}>
+                            Install
+                          </button>
+
+                          {lib.includes?.[0] && (
+                            <button
+                              onClick={() => insertInclude(lib.includes[0])}
+                            >
+                              Insert Include
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="tool-section">
+                  <h3>Installed Libraries</h3>
+
+                  <ul className="installed-list">
+                    {installedLibraries.map((lib, index) => (
+                      <li key={`${lib.name}-${index}`}>
+                        <span>
+                          {lib.name} {lib.version && `v${lib.version}`}
+                        </span>
+
+                        <div>
+                          <button onClick={() => updateLibrary(lib.name)}>
+                            Update
+                          </button>
+                          <button
+                            className="danger-action"
+                            onClick={() => uninstallLibrary(lib.name)}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              </div>
+            )}
+
+            {activeRightTab === "wiring" && (
+              <div className="tool-stack">
+                <section className="tool-section">
+                  <div className="section-heading">
+                    <div>
+                      <p className="eyebrow">Circuit</p>
+                      <h2>Wiring</h2>
+                    </div>
+                  </div>
+
+                  <div className="wiring-grid">
+                    <span>Board</span>
+                    <strong>{selectedBoardName}</strong>
+                    <span>Port</span>
+                    <strong>{selectedPort}</strong>
+                    <span>Sketch</span>
+                    <strong>{activeFile}</strong>
+                  </div>
+
+                  <textarea
+                    placeholder="Wiring notes"
+                    aria-label="Wiring notes"
+                    className="wiring-notes"
+                  />
+                </section>
+              </div>
+            )}
+          </div>
+        </aside>
       </main>
 
-      <section className="manager-grid">
-        <div className="panel manager-panel">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Arduino CLI</p>
-              <h2>Board Manager</h2>
+      <section className="bottom-dock glass-panel">
+        <div className="dock-tabs">
+          {dockTabs.map((tab) => (
+            <button
+              key={tab.id}
+              className={activeDockTab === tab.id ? "active" : ""}
+              onClick={() => setActiveDockTab(tab.id)}
+              aria-pressed={activeDockTab === tab.id}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="dock-body">
+          <div
+            className={
+              activeDockTab === "output"
+                ? "dock-pane active"
+                : "dock-pane dock-pane-hidden"
+            }
+          >
+            <pre className="console-output dock-output">{output}</pre>
+          </div>
+
+          <div
+            className={
+              activeDockTab === "serial" || activeDockTab === "plotter"
+                ? "dock-pane active"
+                : "dock-pane dock-pane-hidden"
+            }
+          >
+            <SerialConsole
+              selectedPort={selectedPort}
+              activeView={activeDockTab === "plotter" ? "plotter" : "serial"}
+            />
+          </div>
+
+          <div
+            className={
+              activeDockTab === "logs"
+                ? "dock-pane active"
+                : "dock-pane dock-pane-hidden"
+            }
+          >
+            <div className="log-grid">
+              <section>
+                <h3>Compiler</h3>
+                <pre className="console-output mini-output">{output}</pre>
+              </section>
+
+              <section>
+                <h3>Board Manager</h3>
+                <pre className="console-output mini-output">{coreOutput}</pre>
+              </section>
+
+              <section>
+                <h3>Library Manager</h3>
+                <pre className="console-output mini-output">{libraryOutput}</pre>
+              </section>
             </div>
           </div>
-
-          <div className="button-row">
-            <button onClick={refreshCores}>Refresh Installed Cores</button>
-            <button onClick={updateCoreIndex}>Update Core Index</button>
-            <button onClick={() => updateCore()}>Update All Cores</button>
-          </div>
-
-          <div className="search-row">
-            <input
-              value={coreSearchQuery}
-              onChange={(e) => setCoreSearchQuery(e.target.value)}
-              placeholder="Search core, example: esp8266"
-            />
-
-            <button onClick={searchCores}>Search Cores</button>
-          </div>
-
-          <div className="search-row">
-            <input
-              value={coreToInstall}
-              onChange={(e) => setCoreToInstall(e.target.value)}
-              placeholder="example: arduino:avr"
-            />
-
-            <button onClick={() => installCore()}>Install Core</button>
-          </div>
-
-          <h3>Core Search Results</h3>
-
-          <div className="result-list">
-            {coreSearchResults.map((core, index) => {
-              const coreId = getCoreInstallId(core);
-
-              return (
-                <div className="result-item" key={`${coreId}-${index}`}>
-                  <strong>{coreId}</strong> {core.version && `v${core.version}`}
-                  <small>{core.name}</small>
-
-                  <button onClick={() => installCore(coreId)}>Install</button>
-                </div>
-              );
-            })}
-          </div>
-
-          <h3>Installed Cores</h3>
-
-          <ul className="installed-list">
-            {installedCores.map((core, index) => {
-              const coreId = getCoreInstallId(core) || getCoreLabel(core);
-
-              return (
-                <li key={`${coreId}-${index}`}>
-                  <span>
-                    {getCoreLabel(core)} {getCoreVersion(core)}
-                  </span>
-
-                  <div>
-                    <button onClick={() => updateCore(coreId)}>Update</button>
-                    <button
-                      className="danger-action"
-                      onClick={() => uninstallCore(coreId)}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-
-          <pre className="console-output manager-output">{coreOutput}</pre>
         </div>
-
-        <div className="panel manager-panel">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Arduino CLI</p>
-              <h2>Library Manager</h2>
-            </div>
-          </div>
-
-          <div className="button-row">
-            <button onClick={refreshLibraries}>Refresh Installed Libraries</button>
-            <button onClick={() => updateLibrary()}>Update All Libraries</button>
-          </div>
-
-          <div className="search-row">
-            <input
-              value={librarySearchQuery}
-              onChange={(e) => setLibrarySearchQuery(e.target.value)}
-              placeholder="Search library, example: wifi"
-            />
-
-            <button onClick={searchLibraries}>Search Libraries</button>
-          </div>
-
-          <h3>Search Results</h3>
-
-          <div className="result-list">
-            {librarySearchResults.map((lib, index) => (
-              <div className="result-item" key={`${lib.name}-${index}`}>
-                <strong>{lib.name}</strong> {lib.version && `v${lib.version}`}
-                <small>{lib.sentence}</small>
-                <small>
-                  {lib.author} | {lib.category}
-                </small>
-
-                {lib.includes?.length > 0 && (
-                  <small>Includes: {lib.includes.join(", ")}</small>
-                )}
-
-                <div className="button-row">
-                  <button onClick={() => installLibrary(lib.name)}>
-                    Install
-                  </button>
-
-                  {lib.includes?.[0] && (
-                    <button onClick={() => insertInclude(lib.includes[0])}>
-                      Insert Include
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <h3>Installed Libraries</h3>
-
-          <ul className="installed-list">
-            {installedLibraries.map((lib, index) => (
-              <li key={`${lib.name}-${index}`}>
-                <span>
-                  {lib.name} {lib.version && `v${lib.version}`}
-                </span>
-
-                <div>
-                  <button onClick={() => updateLibrary(lib.name)}>Update</button>
-                  <button
-                    className="danger-action"
-                    onClick={() => uninstallLibrary(lib.name)}
-                  >
-                    Remove
-                  </button>
-                </div>
-              </li>
-            ))}
-          </ul>
-
-          <pre className="console-output manager-output">{libraryOutput}</pre>
-        </div>
-      </section>
-
-      <section className="panel serial-panel">
-        <div className="panel-heading">
-          <div>
-            <p className="eyebrow">Live Tools</p>
-            <h2>Serial Monitor / Plotter</h2>
-          </div>
-        </div>
-
-        <SerialConsole selectedPort={selectedPort} />
       </section>
     </div>
   );
