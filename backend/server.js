@@ -115,6 +115,107 @@ function runCommand(command, callback) {
   exec(command, { maxBuffer: 1024 * 1024 * 10 }, callback);
 }
 
+function runSpawnCommand(command, args, callback) {
+  const child = spawn(command, args);
+
+  let stdout = "";
+  let stderr = "";
+
+  child.stdout.on("data", (data) => {
+    stdout += data.toString();
+  });
+
+  child.stderr.on("data", (data) => {
+    stderr += data.toString();
+  });
+
+  child.on("close", (code) => {
+    callback(code, stdout, stderr);
+  });
+}
+
+app.get("/cores", (req, res) => {
+  runSpawnCommand(
+    "arduino-cli",
+    ["core", "list", "--format", "json"],
+    (code, stdout, stderr) => {
+      if (code !== 0) {
+        return res.status(500).json({
+          success: false,
+          error: stderr || `arduino-cli exited with code ${code}`,
+        });
+      }
+
+      try {
+        const parsed = JSON.parse(stdout);
+
+        const cores = Array.isArray(parsed)
+          ? parsed
+          : parsed.platforms || parsed.installed_platforms || [];
+
+        res.json({
+          success: true,
+          cores,
+        });
+      } catch {
+        res.json({
+          success: true,
+          raw: stdout,
+        });
+      }
+    }
+  );
+});
+
+app.post("/cores/update-index", (req, res) => {
+  runSpawnCommand(
+    "arduino-cli",
+    ["core", "update-index"],
+    (code, stdout, stderr) => {
+      if (code !== 0) {
+        return res.status(500).json({
+          success: false,
+          error: stderr || `arduino-cli exited with code ${code}`,
+        });
+      }
+
+      res.json({
+        success: true,
+        output: stdout || "Core index updated successfully.",
+      });
+    }
+  );
+});
+
+app.post("/cores/install", (req, res) => {
+  const core = req.body.core;
+
+  if (!core) {
+    return res.status(400).json({
+      success: false,
+      error: "Core name is required. Example: arduino:avr",
+    });
+  }
+
+  runSpawnCommand(
+    "arduino-cli",
+    ["core", "install", core],
+    (code, stdout, stderr) => {
+      if (code !== 0) {
+        return res.status(500).json({
+          success: false,
+          error: stderr || `arduino-cli exited with code ${code}`,
+        });
+      }
+
+      res.json({
+        success: true,
+        output: stdout || `Installed core: ${core}`,
+      });
+    }
+  );
+});
+
 app.get("/", (req, res) => {
   res.send("Arduino IDE Backend Running");
 });
@@ -270,6 +371,157 @@ app.post("/serial/stop", (req, res) => {
   closeSerial(() => {
     res.json({ success: true });
   });
+});
+
+app.get("/libs", (req, res) => {
+  runSpawnCommand(
+    "arduino-cli",
+    ["lib", "list", "--format", "json"],
+    (code, stdout, stderr) => {
+      if (code !== 0) {
+        return res.status(500).json({
+          success: false,
+          error: stderr || `arduino-cli exited with code ${code}`,
+        });
+      }
+
+      try {
+        const parsed = JSON.parse(stdout);
+
+        const libraries = Array.isArray(parsed)
+          ? parsed
+          : parsed.libraries ||
+            parsed.installed_libraries ||
+            parsed.items ||
+            parsed.result ||
+            [];
+
+        const cleanedLibraries = libraries.map((lib) => ({
+          name:
+            lib.name ||
+            lib.library?.name ||
+            lib.metadata?.name ||
+            lib.properties?.name ||
+            "Unknown Library",
+          version:
+            lib.version ||
+            lib.installed_version ||
+            lib.library?.version ||
+            lib.metadata?.version ||
+            "",
+          author:
+            lib.author ||
+            lib.library?.author ||
+            lib.metadata?.author ||
+            "",
+          raw: lib,
+        }));
+
+        res.json({
+          success: true,
+          count: cleanedLibraries.length,
+          libraries: cleanedLibraries,
+        });
+      } catch {
+        res.status(500).json({
+          success: false,
+          error: "Could not parse installed library JSON",
+          raw: stdout,
+        });
+      }
+    }
+  );
+});
+
+app.post("/libs/search", (req, res) => {
+  const query = req.body.query;
+
+  if (!query) {
+    return res.status(400).json({
+      success: false,
+      error: "Search query is required.",
+    });
+  }
+
+  runSpawnCommand(
+    "arduino-cli",
+    ["lib", "search", query, "--format", "json"],
+    (code, stdout, stderr) => {
+      if (code !== 0) {
+        return res.status(500).json({
+          success: false,
+          error: stderr || `arduino-cli exited with code ${code}`,
+        });
+      }
+
+      try {
+        const parsed = JSON.parse(stdout);
+
+        const libraries = Array.isArray(parsed)
+          ? parsed
+          : parsed.libraries || [];
+
+        const cleanedLibraries = libraries
+          .filter((lib) => lib && lib.name)
+          .map((lib) => ({
+            name: lib.name,
+            sentence: lib.latest?.sentence || lib.sentence || "",
+            version: lib.latest?.version || "",
+            author: lib.latest?.author || "",
+            category: lib.latest?.category || "",
+            architectures: lib.latest?.architectures || [],
+            includes: lib.latest?.provides_includes || [],
+          }));
+
+        res.json({
+          success: true,
+          count: cleanedLibraries.length,
+          libraries: cleanedLibraries.slice(0, 30),
+        });
+      } catch {
+        res.status(500).json({
+          success: false,
+          error: "Could not parse library search JSON",
+        });
+      }
+    }
+  );
+});
+
+app.post("/libs/install", (req, res) => {
+  const library = req.body.library;
+
+  console.log("[LIB INSTALL REQUEST]", library);
+
+  if (!library) {
+    return res.status(400).json({
+      success: false,
+      error: "Library name is required.",
+    });
+  }
+
+  runSpawnCommand(
+    "arduino-cli",
+    ["lib", "install", library],
+    (code, stdout, stderr) => {
+
+      console.log("CODE:", code);
+      console.log("STDOUT:", stdout);
+      console.log("STDERR:", stderr);
+
+      if (code !== 0) {
+        return res.status(500).json({
+          success: false,
+          error: stderr || `arduino-cli exited with code ${code}`,
+        });
+      }
+
+      res.json({
+        success: true,
+        output: stdout || `Installed library: ${library}`,
+      });
+    }
+  );
 });
 
 const server = app.listen(5000, () => {

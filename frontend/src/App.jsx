@@ -43,6 +43,10 @@ const PROJECTS_KEY = "webArduinoIDE_projects";
 const AUTOSAVE_KEY = "webArduinoIDE_autosave_tabs";
 
 function App() {
+  const [installedCores, setInstalledCores] = useState([]);
+  const [coreToInstall, setCoreToInstall] = useState("arduino:avr");
+  const [coreOutput, setCoreOutput] = useState("");
+
   const [availableBoards, setAvailableBoards] = useState([]);
   const [output, setOutput] = useState("");
   const [serialData, setSerialData] = useState("");
@@ -58,6 +62,11 @@ function App() {
   const [projectName, setProjectName] = useState("Untitled");
   const [savedProjects, setSavedProjects] = useState([]);
   const [selectedProject, setSelectedProject] = useState("");
+
+  const [installedLibraries, setInstalledLibraries] = useState([]);
+  const [librarySearchQuery, setLibrarySearchQuery] = useState("wifi");
+  const [librarySearchResults, setLibrarySearchResults] = useState([]);
+  const [libraryOutput, setLibraryOutput] = useState("");
 
   const [files, setFiles] = useState(() => {
     const autosaved = localStorage.getItem(AUTOSAVE_KEY);
@@ -80,9 +89,11 @@ function App() {
   const currentCode = currentFile?.content || "";
 
   useEffect(() => {
+    refreshLibraries();
     loadProjectList();
     refreshBoards();
     refreshBoardList();
+    refreshCores();
 
     const ws = new WebSocket("ws://localhost:5000");
     wsRef.current = ws;
@@ -135,13 +146,11 @@ function App() {
 
   const addFile = () => {
     const name = prompt("Enter file name, example: wifi.cpp or config.h");
-    
+
     if (!name) return;
 
     if (name.endsWith(".ino")) {
-      setOutput(
-        "Only one .ino file is allowed. Use .cpp / .h files."
-      );
+      setOutput("Only one .ino file is allowed. Use .cpp / .h files.");
       return;
     }
 
@@ -380,6 +389,140 @@ function App() {
     }
   };
 
+  const refreshLibraries = async () => {
+    try {
+      setLibraryOutput("Loading installed libraries...\n");
+
+      const res = await axios.get("http://localhost:5000/libs");
+      const libs = Array.isArray(res.data.libraries) ? res.data.libraries : [];
+
+      setInstalledLibraries(libs);
+      setLibraryOutput(`Loaded ${libs.length} installed libraries.`);
+    } catch (err) {
+      setLibraryOutput(JSON.stringify(err.response?.data || err.message, null, 2));
+    }
+  };
+
+  const searchLibraries = async () => {
+    try {
+      if (!librarySearchQuery.trim()) {
+        setLibraryOutput("Enter a library search term.");
+        return;
+      }
+
+      setLibraryOutput(`Searching "${librarySearchQuery}"...\n`);
+
+      const res = await axios.post("http://localhost:5000/libs/search", {
+        query: librarySearchQuery.trim(),
+      });
+
+      setLibrarySearchResults(res.data.libraries || []);
+      setLibraryOutput(`Found ${res.data.count || 0} libraries.`);
+    } catch (err) {
+      setLibraryOutput(JSON.stringify(err.response?.data || err.message, null, 2));
+    }
+  };
+
+  const installLibrary = async (libraryName) => {
+    try {
+      setLibraryOutput(`Installing ${libraryName}...\n`);
+
+      const res = await axios.post("http://localhost:5000/libs/install", {
+        library: libraryName,
+      });
+
+      setLibraryOutput(res.data.output || `Installed ${libraryName}`);
+      refreshLibraries();
+    } catch (err) {
+      setLibraryOutput(JSON.stringify(err.response?.data || err.message, null, 2));
+    }
+  };
+
+  const insertInclude = (includeName) => {
+    if (!includeName) {
+      setLibraryOutput("No include file found for this library.");
+      return;
+    }
+
+    const includeLine = `#include <${includeName}>\n`;
+
+    if (currentCode.includes(includeLine.trim())) {
+      setLibraryOutput(`${includeName} already included.`);
+      return;
+    }
+
+    updateCurrentFile(includeLine + currentCode);
+    setLibraryOutput(`Inserted #include <${includeName}>`);
+  };
+
+  const refreshCores = async () => {
+    try {
+      setCoreOutput("Loading installed cores...\n");
+
+      const res = await axios.get("http://localhost:5000/cores");
+
+      const cores = Array.isArray(res.data.cores) ? res.data.cores : [];
+
+      setInstalledCores(cores);
+      setCoreOutput(`Loaded ${cores.length} installed cores.`);
+    } catch (err) {
+      setCoreOutput(JSON.stringify(err.response?.data || err.message, null, 2));
+    }
+  };
+
+  const updateCoreIndex = async () => {
+    try {
+      setCoreOutput("Updating core index...\n");
+
+      const res = await axios.post("http://localhost:5000/cores/update-index");
+
+      setCoreOutput(res.data.output || "Core index updated.");
+
+      refreshBoardList();
+      refreshCores();
+    } catch (err) {
+      setCoreOutput(JSON.stringify(err.response?.data || err.message, null, 2));
+    }
+  };
+
+  const installCore = async () => {
+    try {
+      if (!coreToInstall.trim()) {
+        setCoreOutput("Enter a core name, example: arduino:avr");
+        return;
+      }
+
+      setCoreOutput(`Installing ${coreToInstall}...\n`);
+
+      const res = await axios.post("http://localhost:5000/cores/install", {
+        core: coreToInstall.trim(),
+      });
+
+      setCoreOutput(res.data.output || `Installed ${coreToInstall}`);
+
+      refreshCores();
+      refreshBoardList();
+    } catch (err) {
+      setCoreOutput(JSON.stringify(err.response?.data || err.message, null, 2));
+    }
+  };
+
+  const getCoreLabel = (core) => {
+    return (
+      core.id ||
+      core.ID ||
+      core.platform ||
+      core.name ||
+      core.package ||
+      core.platform_id ||
+      JSON.stringify(core)
+    );
+  };
+
+  const getCoreVersion = (core) => {
+    return core.installed || core.version || core.latest_version || "";
+  };
+
   const compileCode = async () => {
     try {
       setOutput("Compiling...\n");
@@ -489,7 +632,7 @@ function App() {
 
   return (
     <div style={{ padding: "20px" }}>
-      <h1>Web Arduino IDE</h1>
+      <h1>Prompt II Edge</h1>
 
       <div style={{ marginBottom: "15px", padding: "10px", background: "#e9f5ff", border: "1px solid #9bc9ee" }}>
         <h3>Project</h3>
@@ -509,24 +652,42 @@ function App() {
           style={{ padding: "5px", width: "220px" }}
         />
 
-        <button onClick={newProject} style={{ marginLeft: "10px" }}>New Project</button>
-        <button onClick={saveProject} style={{ marginLeft: "10px" }}>Save Project</button>
-        <button onClick={exportCurrentFile} style={{ marginLeft: "10px" }}>Export Current File</button>
-        <button onClick={() => fileInputRef.current.click()} style={{ marginLeft: "10px" }}>Import File</button>
+        <button onClick={newProject} style={{ marginLeft: "10px" }}>
+          New Project
+        </button>
+
+        <button onClick={saveProject} style={{ marginLeft: "10px" }}>
+          Save Project
+        </button>
+
+        <button onClick={exportCurrentFile} style={{ marginLeft: "10px" }}>
+          Export Current File
+        </button>
+
+        <button onClick={() => fileInputRef.current.click()} style={{ marginLeft: "10px" }}>
+          Import File
+        </button>
 
         <select value={selectedProject} onChange={(e) => openProject(e.target.value)} style={{ marginLeft: "10px" }}>
           <option value="">Open Saved Project</option>
           {savedProjects.map((name) => (
-            <option key={name} value={name}>{name}</option>
+            <option key={name} value={name}>
+              {name}
+            </option>
           ))}
         </select>
 
-        <button onClick={deleteProject} style={{ marginLeft: "10px" }}>Delete Project</button>
+        <button onClick={deleteProject} style={{ marginLeft: "10px" }}>
+          Delete Project
+        </button>
       </div>
 
       <div style={{ marginBottom: "15px", padding: "10px", background: "#f3f3f3", border: "1px solid #ccc" }}>
         <button onClick={refreshBoards}>Refresh Boards</button>
-        <button onClick={refreshBoardList} style={{ marginLeft: "10px" }}>Refresh Board List</button>
+
+        <button onClick={refreshBoardList} style={{ marginLeft: "10px" }}>
+          Refresh Board List
+        </button>
 
         <select value={selectedPort} onChange={(e) => setSelectedPort(e.target.value)} style={{ marginLeft: "10px" }}>
           <option value="/dev/ttyUSB0">/dev/ttyUSB0</option>
@@ -563,6 +724,64 @@ function App() {
         </div>
       </div>
 
+      <div
+        style={{
+          marginBottom: "15px",
+          padding: "10px",
+          background: "#fff7e6",
+          border: "1px solid #f0c36d",
+        }}
+      >
+        <h3>Board Manager</h3>
+
+        <button onClick={refreshCores}>Refresh Installed Cores</button>
+
+        <button onClick={updateCoreIndex} style={{ marginLeft: "10px" }}>
+          Update Core Index
+        </button>
+
+        <input
+          value={coreToInstall}
+          onChange={(e) => setCoreToInstall(e.target.value)}
+          placeholder="example: arduino:avr"
+          style={{ marginLeft: "10px", padding: "5px", width: "220px" }}
+        />
+
+        <button onClick={installCore} style={{ marginLeft: "10px" }}>
+          Install Core
+        </button>
+
+        <div style={{ marginTop: "10px" }}>
+          <strong>Installed Cores:</strong>
+
+        <ul
+          style={{
+            textAlign: "left",
+            maxWidth: "600px",
+            margin: "10px auto",
+          }}
+        >
+            {installedCores.map((core, index) => (
+              <li key={index}>
+                {getCoreLabel(core)} {getCoreVersion(core)}
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <pre
+          style={{
+            background: "#222",
+            color: "#fff",
+            padding: "10px",
+            overflow: "auto",
+            maxHeight: "180px",
+          }}
+        >
+          {coreOutput}
+        </pre>
+      </div>
+
       <div style={{ display: "flex", gap: "6px", marginBottom: "6px", alignItems: "center" }}>
         {files.map((file) => (
           <button
@@ -583,9 +802,99 @@ function App() {
         <button onClick={deleteFile}>Delete File</button>
       </div>
 
+      <div
+        style={{
+          marginBottom: "15px",
+          padding: "10px",
+          background: "#eefbea",
+          border: "1px solid #8dcc80",
+        }}
+      >
+        <h3>Library Manager</h3>
+
+        <button onClick={refreshLibraries}>Refresh Installed Libraries</button>
+
+        <input
+          value={librarySearchQuery}
+          onChange={(e) => setLibrarySearchQuery(e.target.value)}
+          placeholder="Search library, example: wifi"
+          style={{ marginLeft: "10px", padding: "5px", width: "240px" }}
+        />
+
+        <button onClick={searchLibraries} style={{ marginLeft: "10px" }}>
+          Search Libraries
+        </button>
+
+        <h4>Search Results</h4>
+
+        <div style={{ maxHeight: "220px", overflow: "auto" }}>
+          {librarySearchResults.map((lib, index) => (
+            <div
+              key={`${lib.name}-${index}`}
+              style={{
+                padding: "8px",
+                marginBottom: "8px",
+                background: "#fff",
+                border: "1px solid #ccc",
+              }}
+            >
+              <strong>{lib.name}</strong> {lib.version && `v${lib.version}`}
+              <br />
+              <small>{lib.sentence}</small>
+              <br />
+              <small>
+                {lib.author} | {lib.category}
+              </small>
+              <br />
+
+              {lib.includes?.length > 0 && (
+                <small>Includes: {lib.includes.join(", ")}</small>
+              )}
+
+              <br />
+
+              <button onClick={() => installLibrary(lib.name)}>
+                Install
+              </button>
+
+              {lib.includes?.[0] && (
+                <button
+                  onClick={() => insertInclude(lib.includes[0])}
+                  style={{ marginLeft: "10px" }}
+                >
+                  Insert Include
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <h4>Installed Libraries</h4>
+
+        <ul style={{ maxHeight: "140px", overflow: "auto" }}>
+          {installedLibraries.map((lib, index) => (
+            <li key={index}>
+              {lib.name} {lib.version && `v${lib.version}`}
+            </li>
+          ))}
+        </ul>
+
+        <pre
+          style={{
+            background: "#222",
+            color: "#fff",
+            padding: "10px",
+            overflow: "auto",
+            maxHeight: "180px",
+          }}
+        >
+          {libraryOutput}
+        </pre>
+      </div>
+
       <Editor
         height="500px"
-        defaultLanguage={activeFile.endsWith(".h") ? "cpp" : "cpp"}
+        defaultLanguage="cpp"
         theme="vs-dark"
         value={currentCode}
         onChange={(value) => updateCurrentFile(value || "")}
@@ -594,11 +903,26 @@ function App() {
       <br />
 
       <button onClick={compileCode}>Compile</button>
-      <button onClick={uploadCode} style={{ marginLeft: "10px" }}>Upload</button>
-      <button onClick={connectSerial} style={{ marginLeft: "10px" }}>Connect Serial</button>
-      <button onClick={disconnectSerial} style={{ marginLeft: "10px" }}>Disconnect Serial</button>
-      <button onClick={clearSerial} style={{ marginLeft: "10px" }}>Clear Serial</button>
-      <button onClick={clearPlot} style={{ marginLeft: "10px" }}>Clear Plot</button>
+
+      <button onClick={uploadCode} style={{ marginLeft: "10px" }}>
+        Upload
+      </button>
+
+      <button onClick={connectSerial} style={{ marginLeft: "10px" }}>
+        Connect Serial
+      </button>
+
+      <button onClick={disconnectSerial} style={{ marginLeft: "10px" }}>
+        Disconnect Serial
+      </button>
+
+      <button onClick={clearSerial} style={{ marginLeft: "10px" }}>
+        Clear Serial
+      </button>
+
+      <button onClick={clearPlot} style={{ marginLeft: "10px" }}>
+        Clear Plot
+      </button>
 
       <h3>Compiler / Upload Output</h3>
 
