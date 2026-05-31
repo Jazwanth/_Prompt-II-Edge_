@@ -2,6 +2,29 @@ import { useState, useEffect, useRef } from "react";
 import Editor from "@monaco-editor/react";
 import axios from "axios";
 
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Title,
+  Tooltip,
+  Legend,
+} from "chart.js";
+
+import { Line } from "react-chartjs-2";
+
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Title,
+  Tooltip,
+  Legend
+);
+
 function App() {
   const [availableBoards, setAvailableBoards] = useState([]);
   const [output, setOutput] = useState("");
@@ -12,7 +35,11 @@ function App() {
   const [selectedPort, setSelectedPort] = useState("/dev/ttyUSB0");
   const [selectedFqbn, setSelectedFqbn] = useState("esp32:esp32:esp32");
 
+  const [plotLabels, setPlotLabels] = useState([]);
+  const [plotValues, setPlotValues] = useState([]);
+
   const wsRef = useRef(null);
+  const pointCounterRef = useRef(0);
 
   const [code, setCode] = useState(`
 void setup() {
@@ -20,8 +47,9 @@ void setup() {
 }
 
 void loop() {
-  Serial.println("Hello ESP32");
-  delay(1000);
+  int value = random(0, 100);
+  Serial.println(value);
+  delay(500);
 }
 `);
 
@@ -50,15 +78,11 @@ void loop() {
         return;
       }
 
-      if (message.includes("[WebSocket")) {
-        return;
-      }
-
-      if (message.includes("[Serial already running")) {
-        return;
-      }
+      if (message.includes("[WebSocket")) return;
+      if (message.includes("[Serial already running")) return;
 
       setSerialData((prev) => prev + message);
+      handlePlotData(message);
     };
 
     ws.onerror = () => {};
@@ -72,12 +96,36 @@ void loop() {
     };
   }, []);
 
+  const handlePlotData = (message) => {
+    const lines = message.split(/\r?\n/);
+
+    lines.forEach((line) => {
+      const trimmed = line.trim();
+
+      if (trimmed === "") return;
+
+      const value = Number(trimmed);
+
+      if (!Number.isFinite(value)) return;
+
+      pointCounterRef.current += 1;
+
+      setPlotLabels((prev) => {
+        const updated = [...prev, pointCounterRef.current.toString()];
+        return updated.slice(-50);
+      });
+
+      setPlotValues((prev) => {
+        const updated = [...prev, value];
+        return updated.slice(-50);
+      });
+    });
+  };
+
   const refreshBoards = async () => {
     try {
       const res = await axios.get("http://localhost:5000/boards");
-      const detected = Array.isArray(res.data.boards)
-        ? res.data.boards
-        : [];
+      const detected = Array.isArray(res.data.boards) ? res.data.boards : [];
 
       setPorts(detected);
 
@@ -85,10 +133,7 @@ void loop() {
         const first = detected[0];
 
         const detectedPort =
-          first.port?.address ||
-          first.address ||
-          first.port ||
-          "/dev/ttyUSB0";
+          first.port?.address || first.address || first.port || "/dev/ttyUSB0";
 
         setSelectedPort(detectedPort);
 
@@ -105,9 +150,7 @@ void loop() {
     try {
       const res = await axios.get("http://localhost:5000/board-list");
 
-      const boards = Array.isArray(res.data.boards)
-        ? res.data.boards
-        : [];
+      const boards = Array.isArray(res.data.boards) ? res.data.boards : [];
 
       setAvailableBoards(boards);
     } catch (err) {
@@ -181,6 +224,12 @@ void loop() {
     setSerialData("");
   };
 
+  const clearPlot = () => {
+    setPlotLabels([]);
+    setPlotValues([]);
+    pointCounterRef.current = 0;
+  };
+
   const getPortAddress = (item) => {
     return item.port?.address || item.address || item.port || "";
   };
@@ -197,6 +246,36 @@ void loop() {
     return `${address} - ${boardName} (${protocol})`;
   };
 
+  const plotData = {
+    labels: plotLabels,
+    datasets: [
+      {
+        label: "Serial Value",
+        data: plotValues,
+        tension: 0.3,
+      },
+    ],
+  };
+
+  const plotOptions = {
+    responsive: true,
+    animation: false,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: {
+        display: true,
+      },
+      title: {
+        display: false,
+      },
+    },
+    scales: {
+      y: {
+        beginAtZero: false,
+      },
+    },
+  };
+
   return (
     <div style={{ padding: "20px" }}>
       <h1>Web Arduino IDE</h1>
@@ -211,10 +290,7 @@ void loop() {
       >
         <button onClick={refreshBoards}>Refresh Boards</button>
 
-        <button
-          onClick={refreshBoardList}
-          style={{ marginLeft: "10px" }}
-        >
+        <button onClick={refreshBoardList} style={{ marginLeft: "10px" }}>
           Refresh Board List
         </button>
 
@@ -246,15 +322,10 @@ void loop() {
           onChange={(e) => setSelectedFqbn(e.target.value)}
           style={{ marginLeft: "10px", maxWidth: "320px" }}
         >
-          <option value="esp32:esp32:esp32">
-            ESP32 Dev Module
-          </option>
+          <option value="esp32:esp32:esp32">ESP32 Dev Module</option>
 
           {availableBoards.map((board, index) => (
-            <option
-              key={`${board.fqbn}-${index}`}
-              value={board.fqbn}
-            >
+            <option key={`${board.fqbn}-${index}`} value={board.fqbn}>
               {board.name} - {board.fqbn}
             </option>
           ))}
@@ -295,6 +366,10 @@ void loop() {
         Clear Serial
       </button>
 
+      <button onClick={clearPlot} style={{ marginLeft: "10px" }}>
+        Clear Plot
+      </button>
+
       <h3>Compiler / Upload Output</h3>
 
       <pre
@@ -321,13 +396,26 @@ void loop() {
           background: "#111",
           color: "#00ff00",
           padding: "10px",
-          height: "250px",
+          height: "220px",
           overflow: "auto",
           marginTop: "20px",
           border: "1px solid #333",
         }}
       >
         <pre>{serialData}</pre>
+      </div>
+
+      <h3>Serial Plotter</h3>
+
+      <div
+        style={{
+          height: "300px",
+          background: "#fff",
+          border: "1px solid #ccc",
+          padding: "10px",
+        }}
+      >
+        <Line data={plotData} options={plotOptions} />
       </div>
     </div>
   );

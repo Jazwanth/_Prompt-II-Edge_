@@ -1,9 +1,9 @@
-
 void setup() {
   Serial.begin(115200);
 }
 
 void loop() {
-  Serial.println("janani");
-  delay(1000);
+  int value = random(0, 100);
+  Serial.println(value);
+  delay(500);
 }
