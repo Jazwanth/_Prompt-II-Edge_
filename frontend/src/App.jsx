@@ -64,6 +64,13 @@ const DEFAULT_LAYOUT_SIZES = {
   right: 330,
   dock: 264,
 };
+const DEFAULT_API_BASE = "http://localhost:5000";
+const API_BASE = (import.meta.env.VITE_API_BASE || DEFAULT_API_BASE).replace(/\/$/, "");
+const DEFAULT_WS_BASE = API_BASE.startsWith("http")
+  ? API_BASE.replace(/^http/i, "ws")
+  : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}${API_BASE}`;
+const WS_BASE = (import.meta.env.VITE_WS_BASE || DEFAULT_WS_BASE).replace(/\/$/, "");
+const apiUrl = (path) => `${API_BASE}${path}`;
 
 const EDITOR_OPTIONS = {
   automaticLayout: true,
@@ -398,7 +405,7 @@ const SerialConsole = memo(function SerialConsole({ selectedPort, activeView }) 
 
   const refreshSerialStatus = useCallback(async () => {
     try {
-      const res = await axios.get("http://localhost:5000/serial/status");
+      const res = await axios.get(apiUrl("/serial/status"));
 
       setIsSerialConnected(Boolean(res.data.connected));
 
@@ -411,7 +418,7 @@ const SerialConsole = memo(function SerialConsole({ selectedPort, activeView }) 
   }, []);
 
   useEffect(() => {
-    const ws = new WebSocket("ws://localhost:5000");
+    const ws = new WebSocket(WS_BASE);
 
     ws.onmessage = (event) => {
       const message = String(event.data);
@@ -462,7 +469,7 @@ const SerialConsole = memo(function SerialConsole({ selectedPort, activeView }) 
 
   const connectSerial = useCallback(async () => {
     try {
-      const res = await axios.post("http://localhost:5000/serial/start", {
+      const res = await axios.post(apiUrl("/serial/start"), {
         port: selectedPort,
         baudRate,
       });
@@ -482,7 +489,7 @@ const SerialConsole = memo(function SerialConsole({ selectedPort, activeView }) 
 
   const disconnectSerial = useCallback(async () => {
     try {
-      await axios.post("http://localhost:5000/serial/stop");
+      await axios.post(apiUrl("/serial/stop"));
       setIsSerialConnected(false);
     } catch (err) {
       queueSerialData(
@@ -507,7 +514,7 @@ const SerialConsole = memo(function SerialConsole({ selectedPort, activeView }) 
 
   const sendSerialMessage = useCallback(async () => {
     try {
-      await axios.post("http://localhost:5000/serial/write", {
+      await axios.post(apiUrl("/serial/write"), {
         message: serialMessage,
         lineEnding: serialLineEnding,
         appendNewline: serialLineEnding !== "none",
@@ -880,8 +887,6 @@ function App() {
   useEffect(() => {
     if (!aiIsGenerating) return undefined;
 
-    setAiStep(AI_STEPS[0]);
-
     const stepTimer = window.setInterval(() => {
       setAiStep((currentStep) => {
         const index = AI_STEPS.indexOf(currentStep);
@@ -1192,7 +1197,7 @@ function App() {
 
   const refreshBoards = async () => {
     try {
-      const res = await axios.get("http://localhost:5000/boards");
+      const res = await axios.get(apiUrl("/boards"));
       const detected = Array.isArray(res.data.boards) ? res.data.boards : [];
 
       setPorts(detected);
@@ -1216,7 +1221,7 @@ function App() {
 
   const refreshBoardList = async () => {
     try {
-      const res = await axios.get("http://localhost:5000/board-list");
+      const res = await axios.get(apiUrl("/board-list"));
       const boards = Array.isArray(res.data.boards) ? res.data.boards : [];
       setAvailableBoards(boards);
     } catch (err) {
@@ -1228,7 +1233,7 @@ function App() {
     try {
       setLibraryOutput("Loading installed libraries...\n");
 
-      const res = await axios.get("http://localhost:5000/libs");
+      const res = await axios.get(apiUrl("/libs"));
       const libs = Array.isArray(res.data.libraries) ? res.data.libraries : [];
 
       setInstalledLibraries(libs);
@@ -1247,7 +1252,7 @@ function App() {
 
       setLibraryOutput(`Searching "${librarySearchQuery}"...\n`);
 
-      const res = await axios.post("http://localhost:5000/libs/search", {
+      const res = await axios.post(apiUrl("/libs/search"), {
         query: librarySearchQuery.trim(),
       });
 
@@ -1262,7 +1267,7 @@ function App() {
     try {
       setLibraryOutput(`Installing ${libraryName}...\n`);
 
-      const res = await axios.post("http://localhost:5000/libs/install", {
+      const res = await axios.post(apiUrl("/libs/install"), {
         library: libraryName,
       });
 
@@ -1282,7 +1287,7 @@ function App() {
 
       setLibraryOutput(`Removing ${libraryName}...\n`);
 
-      const res = await axios.post("http://localhost:5000/libs/uninstall", {
+      const res = await axios.post(apiUrl("/libs/uninstall"), {
         library: libraryName,
       });
 
@@ -1299,7 +1304,7 @@ function App() {
         libraryName ? `Updating ${libraryName}...\n` : "Updating libraries...\n"
       );
 
-      const res = await axios.post("http://localhost:5000/libs/upgrade", {
+      const res = await axios.post(apiUrl("/libs/upgrade"), {
         library: libraryName,
       });
 
@@ -1331,7 +1336,7 @@ function App() {
     try {
       setCoreOutput("Loading installed cores...\n");
 
-      const res = await axios.get("http://localhost:5000/cores");
+      const res = await axios.get(apiUrl("/cores"));
 
       const cores = Array.isArray(res.data.cores) ? res.data.cores : [];
 
@@ -1360,7 +1365,7 @@ function App() {
     try {
       setCoreOutput("Updating core index...\n");
 
-      const res = await axios.post("http://localhost:5000/cores/update-index");
+      const res = await axios.post(apiUrl("/cores/update-index"));
 
       setCoreOutput(res.data.output || "Core index updated.");
 
@@ -1380,7 +1385,7 @@ function App() {
 
       setCoreOutput(`Searching cores for "${coreSearchQuery}"...\n`);
 
-      const res = await axios.post("http://localhost:5000/cores/search", {
+      const res = await axios.post(apiUrl("/cores/search"), {
         query: coreSearchQuery.trim(),
       });
 
@@ -1405,7 +1410,7 @@ function App() {
 
       setCoreOutput(`Installing ${core}...\n`);
 
-      const res = await axios.post("http://localhost:5000/cores/install", {
+      const res = await axios.post(apiUrl("/cores/install"), {
         core,
       });
 
@@ -1427,7 +1432,7 @@ function App() {
 
       setCoreOutput(`Removing ${coreName}...\n`);
 
-      const res = await axios.post("http://localhost:5000/cores/uninstall", {
+      const res = await axios.post(apiUrl("/cores/uninstall"), {
         core: coreName,
       });
 
@@ -1444,7 +1449,7 @@ function App() {
     try {
       setCoreOutput(coreName ? `Updating ${coreName}...\n` : "Updating cores...\n");
 
-      const res = await axios.post("http://localhost:5000/cores/upgrade", {
+      const res = await axios.post(apiUrl("/cores/upgrade"), {
         core: coreName,
       });
 
@@ -1461,7 +1466,7 @@ function App() {
     try {
       setOutput("Compiling...\n");
 
-      const res = await axios.post("http://localhost:5000/compile", {
+      const res = await axios.post(apiUrl("/compile"), {
         files,
         code: currentCode,
         fqbn: selectedFqbn,
@@ -1477,7 +1482,7 @@ function App() {
     try {
       setOutput("Uploading...\n");
 
-      const res = await axios.post("http://localhost:5000/upload", {
+      const res = await axios.post(apiUrl("/upload"), {
         files,
         code: currentCode,
         port: selectedPort,
@@ -1499,7 +1504,7 @@ function App() {
 
       setOutput(`Uploading OTA to ${otaIp}...\n`);
 
-      const res = await axios.post("http://localhost:5000/upload-ota", {
+      const res = await axios.post(apiUrl("/upload-ota"), {
         files,
         code: currentCode,
         fqbn: selectedFqbn,
@@ -1532,7 +1537,7 @@ function App() {
     setOutput("AI: Thinking...\n");
 
     try {
-      const res = await axios.post("http://localhost:5000/api/ai/generate-project", {
+      const res = await axios.post(apiUrl("/api/ai/generate-project"), {
         prompt,
         fqbn: selectedFqbn,
         projectName: projectName.trim(),
