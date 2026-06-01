@@ -1,4 +1,12 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import Editor from "@monaco-editor/react";
 import axios from "axios";
 
@@ -49,6 +57,7 @@ const SERIAL_FLUSH_MS = 100;
 const DEFAULT_BAUD_RATE = 115200;
 const ALLOWED_FILE_EXTENSIONS = [".ino", ".cpp", ".c", ".h", ".hpp", ".txt"];
 const SERIAL_BAUD_RATES = [9600, 19200, 38400, 57600, 74880, 115200, 230400, 921600];
+const AI_STEPS = ["Thinking", "Writing code", "Installing libraries", "Compiling", "Ready"];
 
 const EDITOR_OPTIONS = {
   automaticLayout: true,
@@ -615,6 +624,13 @@ function App() {
   const [otaPassword, setOtaPassword] = useState("");
   const [activeRightTab, setActiveRightTab] = useState("board");
   const [activeDockTab, setActiveDockTab] = useState("output");
+  const [aiPrompt, setAiPrompt] = useState("");
+  const [aiStep, setAiStep] = useState("");
+  const [aiIsGenerating, setAiIsGenerating] = useState(false);
+  const [aiGeneratedWiring, setAiGeneratedWiring] = useState([]);
+  const [aiWarnings, setAiWarnings] = useState([]);
+  const [aiExplanation, setAiExplanation] = useState("");
+  const [showAiUploadModal, setShowAiUploadModal] = useState(false);
 
   const [files, setFiles] = useState(readStoredFiles);
 
@@ -632,6 +648,25 @@ function App() {
   );
 
   const currentCode = currentFile?.content || "";
+
+  useEffect(() => {
+    if (!aiIsGenerating) return undefined;
+
+    setAiStep(AI_STEPS[0]);
+
+    const stepTimer = window.setInterval(() => {
+      setAiStep((currentStep) => {
+        const index = AI_STEPS.indexOf(currentStep);
+        const nextIndex = Math.min(index + 1, AI_STEPS.length - 2);
+
+        return AI_STEPS[nextIndex < 0 ? 0 : nextIndex];
+      });
+    }, 1800);
+
+    return () => {
+      window.clearInterval(stepTimer);
+    };
+  }, [aiIsGenerating]);
 
   useEffect(() => {
     latestFilesRef.current = files;
@@ -768,6 +803,24 @@ function App() {
     loadProjectList();
 
     setOutput(`Project "${name}" saved successfully.`);
+  };
+
+  const saveGeneratedProject = (name, generatedFiles) => {
+    const cleanName = name.trim() || "AI Generated Project";
+    const normalizedFiles = normalizeFiles(generatedFiles);
+    const projects = getProjects();
+
+    projects[cleanName] = {
+      files: normalizedFiles,
+      activeFile: normalizedFiles[0].name,
+      selectedPort,
+      selectedFqbn,
+      updatedAt: new Date().toISOString(),
+    };
+
+    localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
+    setSelectedProject(cleanName);
+    loadProjectList();
   };
 
   const openProject = (name) => {
@@ -1232,6 +1285,86 @@ function App() {
     }
   };
 
+  const generateAiProject = async () => {
+    const prompt = aiPrompt.trim();
+
+    if (!prompt) {
+      setOutput("Enter a prompt for the AI project generator.");
+      setActiveDockTab("output");
+      return;
+    }
+
+    setAiIsGenerating(true);
+    setAiStep(AI_STEPS[0]);
+    setAiWarnings([]);
+    setAiGeneratedWiring([]);
+    setAiExplanation("");
+    setShowAiUploadModal(false);
+    setActiveDockTab("output");
+    setOutput("AI: Thinking...\n");
+
+    try {
+      const res = await axios.post("http://localhost:5000/api/ai/generate-project", {
+        prompt,
+        fqbn: selectedFqbn,
+        projectName: projectName.trim(),
+        files,
+      });
+
+      const project = res.data.project || {};
+      const generatedFiles = normalizeFiles(project.files || []);
+      const generatedName = project.projectName || projectName || "AI Generated Project";
+      const generatedWiring = res.data.wiring || project.wiring || [];
+      const generatedWarnings = res.data.warnings || project.warnings || [];
+
+      setProjectName(generatedName);
+      setFiles(generatedFiles);
+      setActiveFile(generatedFiles[0]?.name || MAIN_FILE);
+      setAiGeneratedWiring(generatedWiring);
+      setAiWarnings(generatedWarnings);
+      setAiExplanation(res.data.explanation || project.explanation || "");
+      setAiStep(AI_STEPS[AI_STEPS.length - 1]);
+      setOutput(res.data.compileOutput || "AI project generated and compiled.");
+      saveGeneratedProject(generatedName, generatedFiles);
+
+      if (res.data.readyToUpload) {
+        setShowAiUploadModal(true);
+      }
+    } catch (err) {
+      const data = err.response?.data || {};
+      const project = data.project || {};
+
+      if (project.files) {
+        const generatedFiles = normalizeFiles(project.files);
+        const generatedName = project.projectName || projectName || "AI Generated Project";
+
+        setProjectName(generatedName);
+        setFiles(generatedFiles);
+        setActiveFile(generatedFiles[0]?.name || MAIN_FILE);
+        setAiGeneratedWiring(data.wiring || project.wiring || []);
+        setAiWarnings(data.warnings || project.warnings || []);
+        setAiExplanation(data.explanation || project.explanation || "");
+      }
+
+      setAiStep("Compile failed");
+      setOutput(data.compileOutput || formatApiError(err));
+    } finally {
+      setAiIsGenerating(false);
+    }
+  };
+
+  const uploadAiProjectUsb = async () => {
+    setShowAiUploadModal(false);
+    setUploadMode("usb");
+    await uploadCode();
+  };
+
+  const uploadAiProjectOta = async () => {
+    setShowAiUploadModal(false);
+    setUploadMode("ota");
+    await uploadOtaCode();
+  };
+
   const savedProjectOptions = useMemo(
     () =>
       savedProjects.map((name) => (
@@ -1289,7 +1422,9 @@ function App() {
     <div className="ide-shell">
       <header className="command-bar glass-panel">
         <div className="project-identity">
-          <div className="brand-mark">PE</div>
+          <div className="brand-mark">
+            <img src="/logo.png?v=3" alt="Prompt II Edge logo" />
+          </div>
 
           <label className="project-title-field">
             <span>Prompt II Edge</span>
@@ -1501,21 +1636,101 @@ function App() {
                   <div className="section-heading">
                     <div>
                       <p className="eyebrow">Assistant</p>
-                      <h2>AI</h2>
+                      <h2>Project Generator</h2>
                     </div>
-                  </div>
 
-                  <div className="assistant-feed">
-                    <div className="assistant-message">No active chat.</div>
+                    <span
+                      className={
+                        aiStep === "Ready"
+                          ? "status-pill status-pill-success"
+                          : aiIsGenerating
+                          ? "status-pill status-pill-info"
+                          : "status-pill status-pill-muted"
+                      }
+                    >
+                      {aiStep || "Idle"}
+                    </span>
                   </div>
 
                   <textarea
-                    placeholder="Ask about this sketch"
-                    aria-label="AI assistant input"
+                    value={aiPrompt}
+                    onChange={(event) => setAiPrompt(event.target.value)}
+                    placeholder="Create ESP32 code for DHT11 and OLED"
+                    aria-label="AI project prompt"
                     className="assistant-input"
                   />
 
-                  <button disabled>Ask</button>
+                  <button
+                    className="primary-action"
+                    onClick={generateAiProject}
+                    disabled={aiIsGenerating}
+                  >
+                    Generate Project
+                  </button>
+
+                  <div className="ai-step-list" aria-live="polite">
+                    {AI_STEPS.map((step) => {
+                      const currentIndex = AI_STEPS.indexOf(aiStep);
+                      const stepIndex = AI_STEPS.indexOf(step);
+                      const isDone = currentIndex >= stepIndex && currentIndex >= 0;
+                      const isActive = aiStep === step;
+
+                      return (
+                        <span
+                          key={step}
+                          className={[
+                            "ai-step",
+                            isDone ? "done" : "",
+                            isActive ? "active" : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" ")}
+                        >
+                          {step}
+                        </span>
+                      );
+                    })}
+                  </div>
+
+                  {aiGeneratedWiring.length > 0 && (
+                    <div className="ai-result-block">
+                      <h3>Wiring</h3>
+
+                      <div className="wiring-table">
+                        <div>Module</div>
+                        <div>Pin</div>
+                        <div>Board</div>
+                        <div>Note</div>
+
+                        {aiGeneratedWiring.map((wire, index) => (
+                          <Fragment key={`${wire.module}-${wire.boardPin}-${index}`}>
+                            <span>{wire.module}</span>
+                            <span>{wire.modulePin}</span>
+                            <strong>{wire.boardPin}</strong>
+                            <span>{wire.note}</span>
+                          </Fragment>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {aiWarnings.length > 0 && (
+                    <div className="ai-result-block">
+                      <h3>Warnings</h3>
+
+                      <ul className="ai-warning-list">
+                        {aiWarnings.map((warning, index) => (
+                          <li key={`${warning}-${index}`}>{warning}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {aiExplanation && (
+                    <div className="assistant-feed">
+                      <div className="assistant-message">{aiExplanation}</div>
+                    </div>
+                  )}
                 </section>
               </div>
             )}
@@ -1740,6 +1955,24 @@ function App() {
                     <strong>{activeFile}</strong>
                   </div>
 
+                  {aiGeneratedWiring.length > 0 && (
+                    <div className="wiring-table">
+                      <div>Module</div>
+                      <div>Pin</div>
+                      <div>Board</div>
+                      <div>Note</div>
+
+                      {aiGeneratedWiring.map((wire, index) => (
+                        <Fragment key={`${wire.module}-${wire.boardPin}-${index}`}>
+                          <span>{wire.module}</span>
+                          <span>{wire.modulePin}</span>
+                          <strong>{wire.boardPin}</strong>
+                          <span>{wire.note}</span>
+                        </Fragment>
+                      ))}
+                    </div>
+                  )}
+
                   <textarea
                     placeholder="Wiring notes"
                     aria-label="Wiring notes"
@@ -1816,6 +2049,27 @@ function App() {
           </div>
         </div>
       </section>
+
+      {showAiUploadModal && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true">
+          <div className="upload-modal">
+            <h2>Project is ready. Upload now?</h2>
+
+            <div className="modal-actions">
+              <button className="primary-action" onClick={uploadAiProjectUsb}>
+                Upload USB
+              </button>
+              <button onClick={uploadAiProjectOta}>Upload OTA</button>
+              <button
+                className="danger-action"
+                onClick={() => setShowAiUploadModal(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

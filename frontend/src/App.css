@@ -48,17 +48,22 @@
 }
 
 .brand-mark {
-  width: 36px;
-  height: 36px;
-  display: grid;
+  width: 112px;
+  height: 42px;
   flex: 0 0 auto;
-  place-items: center;
-  color: #03131c;
-  background: var(--primary);
-  border-radius: 8px;
-  font-size: 13px;
-  font-weight: 800;
-  letter-spacing: 0;
+  overflow: hidden;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.brand-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
 }
 
 .project-title-field {
@@ -392,6 +397,62 @@
   min-height: 96px;
 }
 
+.ai-step-list {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+
+.ai-step {
+  min-width: 0;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  overflow: hidden;
+  color: var(--muted);
+  background: rgba(13, 15, 20, 0.46);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 800;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-step.done {
+  color: #bbf7d0;
+  border-color: rgba(34, 197, 94, 0.34);
+}
+
+.ai-step.active {
+  color: #03131c;
+  background: var(--primary);
+  border-color: transparent;
+}
+
+.ai-result-block {
+  display: grid;
+  gap: 8px;
+}
+
+.ai-result-block h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.ai-warning-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  color: #fde68a;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .meta-list {
   display: grid;
   gap: 8px;
@@ -420,6 +481,39 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.wiring-table {
+  display: grid;
+  grid-template-columns: minmax(70px, 1fr) minmax(54px, 0.8fr) minmax(64px, 0.8fr) minmax(90px, 1.2fr);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.wiring-table > div,
+.wiring-table > span,
+.wiring-table > strong {
+  min-width: 0;
+  padding: 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.wiring-table > div:nth-child(4n),
+.wiring-table > span:nth-child(4n),
+.wiring-table > strong:nth-child(4n) {
+  border-right: 0;
+}
+
+.wiring-table > div {
+  color: var(--muted);
+  background: rgba(13, 15, 20, 0.52);
+  font-weight: 800;
 }
 
 .result-list {
@@ -590,6 +684,40 @@
 
 .hidden-input {
   display: none;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(3, 7, 18, 0.68);
+}
+
+.upload-modal {
+  display: grid;
+  gap: 14px;
+  width: min(420px, 100%);
+  padding: 18px;
+  background: var(--surface-strong);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.upload-modal h2 {
+  margin: 0;
+  color: var(--heading);
+  font-size: 18px;
+}
+
+.modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
 }
 
 @media (max-width: 1320px) {

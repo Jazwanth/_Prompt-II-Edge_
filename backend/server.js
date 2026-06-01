@@ -1,10 +1,15 @@
 const fs = require("fs");
 const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, ".env") });
 const express = require("express");
 const cors = require("cors");
 const { spawn } = require("child_process");
 const { SerialPort } = require("serialport");
 const WebSocket = require("ws");
+const {
+  generateArduinoProject,
+  repairArduinoProject,
+} = require("./src/services/ai/geminiProvider");
 
 const app = express();
 
@@ -16,6 +21,19 @@ const DEFAULT_FQBN = "esp32:esp32:esp32";
 const DEFAULT_BAUD_RATE = 115200;
 const SKETCH_DIR = path.join(__dirname, "tempSketch");
 const MAIN_FILE = "tempSketch.ino";
+const AI_ALLOWED_FILE_EXTENSIONS = new Set([".ino", ".cpp", ".c", ".h", ".hpp", ".txt"]);
+const CORE_LIBRARY_NAMES = new Set([
+  "arduino",
+  "arduinoh",
+  "arduinoota",
+  "eeprom",
+  "esp",
+  "esp32",
+  "esp8266wifi",
+  "spi",
+  "wifi",
+  "wire",
+]);
 const DEFAULT_OTA_IP = "192.168.1.100";
 const DEFAULT_OTA_PASSWORD = "";
 const BOARD_LIST_CACHE_MS = 5 * 60 * 1000;
@@ -62,6 +80,13 @@ function safeFileName(name) {
   return safeName && safeName !== "." && safeName !== ".."
     ? safeName
     : MAIN_FILE;
+}
+
+function getFileExtension(name) {
+  const safeName = String(name || "");
+  const dotIndex = safeName.lastIndexOf(".");
+
+  return dotIndex >= 0 ? safeName.slice(dotIndex).toLowerCase() : "";
 }
 
 function requestString(value, fallback) {
@@ -292,6 +317,201 @@ function runArduinoCliSequence(argsList, callback) {
   };
 
   runNext();
+}
+
+function runArduinoCliAsync(args) {
+  return new Promise((resolve) => {
+    runArduinoCli(args, (code, stdout, stderr) => {
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
+
+function cleanAiText(value, fallback = "") {
+  if (typeof value !== "string") return fallback;
+
+  return value.replace(/[\u0000-\u001f\u007f]/g, " ").trim() || fallback;
+}
+
+function cleanProjectName(value, fallback) {
+  return cleanAiText(value, fallback)
+    .replace(/[<>:"/\\|?*]/g, "_")
+    .replace(/\s+/g, " ")
+    .slice(0, 80);
+}
+
+function uniqueStringList(values, limit = 30) {
+  const seen = new Set();
+  const cleaned = [];
+
+  if (!Array.isArray(values)) return cleaned;
+
+  values.forEach((value) => {
+    const item = cleanAiText(value).replace(/\s+/g, " ").slice(0, 120);
+    const key = item.toLowerCase();
+
+    if (!item || seen.has(key)) return;
+
+    seen.add(key);
+    cleaned.push(item);
+  });
+
+  return cleaned.slice(0, limit);
+}
+
+function normalizeAiFiles(files) {
+  const sourceFiles = Array.isArray(files) ? files : [];
+  const normalizedFiles = [];
+  const seenNames = new Set();
+  let hasMainFile = false;
+
+  sourceFiles.forEach((file) => {
+    if (!file || typeof file !== "object") return;
+
+    const safeName = safeFileName(file.name || MAIN_FILE);
+    const extension = getFileExtension(safeName);
+
+    if (!AI_ALLOWED_FILE_EXTENSIONS.has(extension)) return;
+
+    const name = extension === ".ino" ? MAIN_FILE : safeName;
+
+    if (seenNames.has(name)) return;
+
+    seenNames.add(name);
+    hasMainFile = hasMainFile || name === MAIN_FILE;
+    normalizedFiles.push({
+      name,
+      content: sketchContent(file.content),
+    });
+  });
+
+  if (!hasMainFile) {
+    normalizedFiles.unshift({
+      name: MAIN_FILE,
+      content: "",
+    });
+  }
+
+  return normalizedFiles;
+}
+
+function normalizeAiWiring(wiring) {
+  if (!Array.isArray(wiring)) return [];
+
+  return wiring
+    .filter((item) => item && typeof item === "object")
+    .map((item) => ({
+      module: cleanAiText(item.module),
+      modulePin: cleanAiText(item.modulePin),
+      boardPin: cleanAiText(item.boardPin),
+      note: cleanAiText(item.note),
+    }))
+    .filter((item) => item.module || item.modulePin || item.boardPin || item.note)
+    .slice(0, 80);
+}
+
+function validateAiProject(project, fallbackProjectName) {
+  if (!project || typeof project !== "object" || Array.isArray(project)) {
+    throw new Error("Gemini did not return a project object.");
+  }
+
+  const files = normalizeAiFiles(project.files);
+
+  if (files.length === 0 || files.every((file) => !file.content.trim())) {
+    throw new Error("Gemini did not return usable sketch files.");
+  }
+
+  return {
+    projectName: cleanProjectName(
+      project.projectName,
+      fallbackProjectName || "AI Generated Project"
+    ),
+    libraries: uniqueStringList(project.libraries, 20),
+    files,
+    wiring: normalizeAiWiring(project.wiring),
+    explanation: cleanAiText(project.explanation),
+    warnings: uniqueStringList(project.warnings, 30),
+  };
+}
+
+function isCoreLibraryName(library) {
+  const cleaned = cleanAiText(library).toLowerCase().replace(/[^a-z0-9]/g, "");
+
+  return CORE_LIBRARY_NAMES.has(cleaned);
+}
+
+async function installProjectLibraries(libraries) {
+  const results = [];
+
+  for (const library of uniqueStringList(libraries, 20)) {
+    if (isCoreLibraryName(library)) {
+      results.push({
+        library,
+        success: true,
+        skipped: true,
+        output: "Skipped core library bundled with the selected board package.",
+        error: "",
+      });
+      continue;
+    }
+
+    const result = await runArduinoCliAsync(["lib", "install", library]);
+
+    results.push({
+      library,
+      success: result.code === 0,
+      skipped: false,
+      output: result.stdout,
+      error: result.stderr || (result.code !== 0 ? `arduino-cli exited with code ${result.code}` : ""),
+    });
+  }
+
+  return results;
+}
+
+function compileSketchForBoard(fqbn) {
+  return runArduinoCliAsync(["compile", "--fqbn", fqbn, SKETCH_DIR]);
+}
+
+function compileErrorText(result) {
+  if (!result) return "";
+
+  return result.stderr || result.stdout || `arduino-cli exited with code ${result.code}`;
+}
+
+function formatInstallOutput(results) {
+  if (!results.length) return "No external libraries requested.";
+
+  return results
+    .map((result) => {
+      if (result.skipped) return `[library] ${result.library}: skipped core library`;
+      if (result.success) return `[library] ${result.library}: installed`;
+
+      return `[library] ${result.library}: install failed\n${result.error}`;
+    })
+    .join("\n");
+}
+
+function installWarnings(results) {
+  return results
+    .filter((result) => !result.success)
+    .map((result) => `Could not install "${result.library}": ${result.error}`);
+}
+
+function appendUniqueWarnings(project, warnings) {
+  return {
+    ...project,
+    warnings: uniqueStringList([...(project.warnings || []), ...warnings], 40),
+  };
+}
+
+function aiResponseProject(project, fqbn, installResults, repaired) {
+  return {
+    ...project,
+    fqbn,
+    repaired,
+    libraryInstallResults: installResults,
+  };
 }
 
 app.get("/cores", (req, res) => {
@@ -572,6 +792,125 @@ app.get("/board-list", (req, res) => {
       });
     }
   });
+});
+
+app.post("/api/ai/generate-project", async (req, res) => {
+  const prompt = requestString(req.body.prompt, "");
+  const selectedFqbn = requestString(req.body.fqbn, "");
+  const requestedProjectName = requestString(req.body.projectName, "");
+  const currentFiles = Array.isArray(req.body.files)
+    ? normalizeAiFiles(req.body.files)
+    : [];
+
+  if (!prompt) {
+    return res.status(400).json({
+      success: false,
+      error: "Prompt is required.",
+    });
+  }
+
+  if (!selectedFqbn) {
+    return res.status(400).json({
+      success: false,
+      error: "Board FQBN is required.",
+    });
+  }
+
+  try {
+    let project = validateAiProject(
+      await generateArduinoProject({
+        prompt,
+        fqbn: selectedFqbn,
+        projectName: requestedProjectName,
+        files: currentFiles,
+      }),
+      requestedProjectName
+    );
+
+    saveSketchFiles(project.files);
+
+    let installResults = await installProjectLibraries(project.libraries);
+    project = appendUniqueWarnings(project, installWarnings(installResults));
+
+    let compileResult = await compileSketchForBoard(selectedFqbn);
+    let repaired = false;
+
+    if (compileResult.code !== 0) {
+      const repairError = compileErrorText(compileResult);
+
+      const repairedProject = validateAiProject(
+        await repairArduinoProject({
+          prompt,
+          fqbn: selectedFqbn,
+          projectName: project.projectName,
+          files: project.files,
+          repairContext: {
+            project,
+            compileError: repairError,
+          },
+        }),
+        project.projectName
+      );
+
+      project = {
+        ...appendUniqueWarnings(repairedProject, [
+          "The first generated version failed to compile, so Gemini made one correction pass.",
+        ]),
+      };
+
+      saveSketchFiles(project.files);
+
+      const repairInstallResults = await installProjectLibraries(project.libraries);
+      installResults = [...installResults, ...repairInstallResults];
+      project = appendUniqueWarnings(project, installWarnings(repairInstallResults));
+
+      compileResult = await compileSketchForBoard(selectedFqbn);
+      repaired = true;
+    }
+
+    const compileOutput = [
+      formatInstallOutput(installResults),
+      compileResult.stdout,
+      compileResult.stderr,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+
+    const responseProject = aiResponseProject(
+      project,
+      selectedFqbn,
+      installResults,
+      repaired
+    );
+
+    if (compileResult.code !== 0) {
+      return res.status(500).json({
+        success: false,
+        error: compileErrorText(compileResult),
+        project: responseProject,
+        compileOutput,
+        wiring: project.wiring,
+        explanation: project.explanation,
+        warnings: project.warnings,
+        readyToUpload: false,
+      });
+    }
+
+    return res.json({
+      success: true,
+      project: responseProject,
+      compileOutput,
+      wiring: project.wiring,
+      explanation: project.explanation,
+      warnings: project.warnings,
+      readyToUpload: true,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: error.message || "AI project generation failed.",
+    });
+  }
 });
 
 app.post("/compile", (req, res) => {
