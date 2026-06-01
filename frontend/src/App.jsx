@@ -65,7 +65,20 @@ const DEFAULT_LAYOUT_SIZES = {
   right: 330,
   dock: 264,
 };
-const DEFAULT_API_BASE = "http://localhost:5000";
+const LOCAL_API_BASE = "http://localhost:5000";
+const getDefaultApiBase = () => {
+  if (typeof window === "undefined") return LOCAL_API_BASE;
+
+  const localHosts = new Set(["localhost", "127.0.0.1", "::1"]);
+
+  if (window.location.protocol.startsWith("http") && !localHosts.has(window.location.hostname)) {
+    return window.location.origin;
+  }
+
+  return LOCAL_API_BASE;
+};
+
+const DEFAULT_API_BASE = getDefaultApiBase();
 const readBackendConfig = () => {
   if (typeof window === "undefined") return {};
 
@@ -1784,22 +1797,6 @@ function App() {
             </select>
           </label>
 
-          <div className="backend-control">
-            <label className="compact-field compact-field-backend">
-              <span>Backend</span>
-              <input
-                value={backendUrlDraft}
-                onChange={(e) => setBackendUrlDraft(e.target.value)}
-                onKeyDown={handleBackendUrlKeyDown}
-                placeholder="https://example.trycloudflare.com"
-                aria-label="Backend URL"
-                className="backend-url-input"
-              />
-            </label>
-
-            <button onClick={saveBackendUrl}>Use</button>
-            <button onClick={resetBackendUrl}>Reset</button>
-          </div>
         </div>
 
         <div className="command-status">
@@ -1807,7 +1804,6 @@ function App() {
             Board {selectedBoardName}
           </span>
           <span className="status-pill status-pill-info">Port {selectedPort}</span>
-          <span className="status-pill status-pill-info">Backend {backendHostLabel}</span>
         </div>
 
         <div className="command-actions">
@@ -2087,7 +2083,35 @@ function App() {
                       <dt>Port</dt>
                       <dd>{selectedPort}</dd>
                     </div>
+                    <div>
+                      <dt>Backend</dt>
+                      <dd>{backendHostLabel}</dd>
+                    </div>
                   </dl>
+                </section>
+
+                <section className="tool-section">
+                  <div className="section-heading">
+                    <div>
+                      <p className="eyebrow">Connection</p>
+                      <h2>Backend URL</h2>
+                    </div>
+                  </div>
+
+                  <div className="backend-settings">
+                    <input
+                      value={backendUrlDraft}
+                      onChange={(e) => setBackendUrlDraft(e.target.value)}
+                      onKeyDown={handleBackendUrlKeyDown}
+                      placeholder="https://example.trycloudflare.com"
+                      aria-label="Backend URL"
+                    />
+
+                    <div className="button-row">
+                      <button onClick={saveBackendUrl}>Use</button>
+                      <button onClick={resetBackendUrl}>Reset</button>
+                    </div>
+                  </div>
                 </section>
 
                 <section className="tool-section">

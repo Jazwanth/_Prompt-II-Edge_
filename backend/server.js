@@ -20,6 +20,8 @@ const DEFAULT_PORT = "/dev/ttyUSB0";
 const DEFAULT_FQBN = "esp32:esp32:esp32";
 const DEFAULT_BAUD_RATE = 115200;
 const SKETCH_DIR = path.join(__dirname, "tempSketch");
+const FRONTEND_DIST_DIR = path.join(__dirname, "../frontend/dist");
+const FRONTEND_INDEX_FILE = path.join(FRONTEND_DIST_DIR, "index.html");
 const MAIN_FILE = "tempSketch.ino";
 const AI_ALLOWED_FILE_EXTENSIONS = new Set([".ino", ".cpp", ".c", ".h", ".hpp", ".txt"]);
 const CORE_LIBRARY_NAMES = new Set([
@@ -47,6 +49,10 @@ let clients = [];
 let boardListCache = null;
 let boardListCacheAt = 0;
 let expectedSerialClose = false;
+
+function hasFrontendBuild() {
+  return fs.existsSync(FRONTEND_INDEX_FILE);
+}
 
 function getCachedBoardList() {
   if (!boardListCache) return null;
@@ -718,7 +724,15 @@ app.post("/cores/upgrade", (req, res) => {
   });
 });
 
+if (fs.existsSync(FRONTEND_DIST_DIR)) {
+  app.use(express.static(FRONTEND_DIST_DIR));
+}
+
 app.get("/", (req, res) => {
+  if (hasFrontendBuild()) {
+    return res.sendFile(FRONTEND_INDEX_FILE);
+  }
+
   res.send("Arduino IDE Backend Running");
 });
 
@@ -1284,6 +1298,15 @@ app.post("/libs/upgrade", (req, res) => {
     });
   });
 });
+
+app.get(
+  /^\/(?!api(?:\/|$)|serial(?:\/|$)|boards(?:\/|$)|board-list(?:\/|$)|libs(?:\/|$)|cores(?:\/|$)|compile(?:\/|$)|upload(?:\/|$)|upload-ota(?:\/|$)).*/,
+  (req, res, next) => {
+    if (!hasFrontendBuild()) return next();
+
+    res.sendFile(FRONTEND_INDEX_FILE);
+  }
+);
 
 const server = app.listen(SERVER_PORT, SERVER_HOST, () => {
   console.log(`Backend running at http://${SERVER_HOST}:${SERVER_PORT}`);

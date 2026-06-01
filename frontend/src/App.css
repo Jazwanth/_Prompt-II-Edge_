@@ -90,7 +90,6 @@
 
 .command-selects {
   min-width: 0;
-  flex-wrap: wrap;
 }
 
 .compact-field {
@@ -103,27 +102,6 @@
 .compact-field-port {
   flex-basis: 190px;
   max-width: 240px;
-}
-
-.backend-control {
-  display: flex;
-  align-items: end;
-  gap: 6px;
-  min-width: 0;
-  flex: 1 1 320px;
-}
-
-.compact-field-backend {
-  flex: 1 1 220px;
-}
-
-.backend-url-input {
-  min-width: 0;
-}
-
-.backend-control button {
-  min-height: 32px;
-  padding-inline: 10px;
 }
 
 .board-select {
@@ -370,6 +348,16 @@ body.is-resizing-dock {
 .button-row,
 .search-row {
   flex-wrap: wrap;
+}
+
+.backend-settings {
+  display: grid;
+  gap: 8px;
+}
+
+.backend-settings input {
+  width: 100%;
+  min-width: 0;
 }
 
 .button-row > button,
