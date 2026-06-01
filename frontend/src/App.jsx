@@ -50,6 +50,7 @@ void loop() {
 const PROJECTS_KEY = "webArduinoIDE_projects";
 const AUTOSAVE_KEY = "webArduinoIDE_autosave_tabs";
 const LAYOUT_KEY = "webArduinoIDE_layout_sizes";
+const BACKEND_CONFIG_KEY = "webArduinoIDE_backend_config";
 const MAIN_FILE = "tempSketch.ino";
 const AUTOSAVE_DELAY_MS = 500;
 const MAX_SERIAL_CHARS = 22000;
@@ -65,11 +66,47 @@ const DEFAULT_LAYOUT_SIZES = {
   dock: 264,
 };
 const DEFAULT_API_BASE = "http://localhost:5000";
-const API_BASE = (import.meta.env.VITE_API_BASE || DEFAULT_API_BASE).replace(/\/$/, "");
-const DEFAULT_WS_BASE = API_BASE.startsWith("http")
-  ? API_BASE.replace(/^http/i, "ws")
-  : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}${API_BASE}`;
-const WS_BASE = (import.meta.env.VITE_WS_BASE || DEFAULT_WS_BASE).replace(/\/$/, "");
+const readBackendConfig = () => {
+  if (typeof window === "undefined") return {};
+
+  try {
+    const storedConfig = window.localStorage.getItem(BACKEND_CONFIG_KEY);
+    return storedConfig ? JSON.parse(storedConfig) : {};
+  } catch {
+    return {};
+  }
+};
+
+const normalizeBaseUrl = (value, fallback = DEFAULT_API_BASE) => {
+  let nextValue = typeof value === "string" ? value.trim() : "";
+
+  if (nextValue && /^wss?:/i.test(nextValue)) {
+    nextValue = nextValue.replace(/^wss/i, "https").replace(/^ws/i, "http");
+  }
+
+  if (nextValue && !/^[a-z][a-z0-9+.-]*:/i.test(nextValue) && !nextValue.startsWith("/")) {
+    nextValue = `https://${nextValue}`;
+  }
+
+  return (nextValue || fallback).replace(/\/+$/, "");
+};
+
+const toWebSocketBase = (apiBase) => {
+  if (/^https:/i.test(apiBase)) return apiBase.replace(/^https/i, "wss");
+  if (/^http:/i.test(apiBase)) return apiBase.replace(/^http/i, "ws");
+
+  if (typeof window === "undefined") return apiBase;
+
+  return `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}${apiBase}`;
+};
+
+const backendConfig = readBackendConfig();
+const API_BASE = normalizeBaseUrl(backendConfig.apiBase || import.meta.env.VITE_API_BASE);
+const DEFAULT_WS_BASE = toWebSocketBase(API_BASE);
+const WS_BASE = normalizeBaseUrl(
+  backendConfig.wsBase || import.meta.env.VITE_WS_BASE || DEFAULT_WS_BASE,
+  DEFAULT_WS_BASE
+);
 const apiUrl = (path) => `${API_BASE}${path}`;
 
 const EDITOR_OPTIONS = {
@@ -727,6 +764,7 @@ function App() {
   const [showAiUploadModal, setShowAiUploadModal] = useState(false);
   const [layoutSizes, setLayoutSizes] = useState(readStoredLayoutSizes);
   const [activeResizePanel, setActiveResizePanel] = useState("");
+  const [backendUrlDraft, setBackendUrlDraft] = useState(API_BASE);
 
   const [files, setFiles] = useState(readStoredFiles);
 
@@ -1637,6 +1675,43 @@ function App() {
     availableBoards.find((board) => board.fqbn === selectedFqbn)?.name ||
     selectedFqbn;
 
+  const backendHostLabel = useMemo(() => {
+    try {
+      return new URL(API_BASE, window.location.origin).host || API_BASE;
+    } catch {
+      return API_BASE;
+    }
+  }, []);
+
+  const saveBackendUrl = useCallback(() => {
+    const apiBase = normalizeBaseUrl(backendUrlDraft);
+
+    localStorage.setItem(
+      BACKEND_CONFIG_KEY,
+      JSON.stringify({
+        apiBase,
+        wsBase: toWebSocketBase(apiBase),
+      })
+    );
+
+    window.location.reload();
+  }, [backendUrlDraft]);
+
+  const resetBackendUrl = useCallback(() => {
+    localStorage.removeItem(BACKEND_CONFIG_KEY);
+    window.location.reload();
+  }, []);
+
+  const handleBackendUrlKeyDown = useCallback(
+    (event) => {
+      if (event.key !== "Enter") return;
+
+      event.preventDefault();
+      saveBackendUrl();
+    },
+    [saveBackendUrl]
+  );
+
   const rightTabs = [
     { id: "assistant", label: "AI" },
     { id: "board", label: "Board" },
@@ -1708,6 +1783,23 @@ function App() {
               {portOptions}
             </select>
           </label>
+
+          <div className="backend-control">
+            <label className="compact-field compact-field-backend">
+              <span>Backend</span>
+              <input
+                value={backendUrlDraft}
+                onChange={(e) => setBackendUrlDraft(e.target.value)}
+                onKeyDown={handleBackendUrlKeyDown}
+                placeholder="https://example.trycloudflare.com"
+                aria-label="Backend URL"
+                className="backend-url-input"
+              />
+            </label>
+
+            <button onClick={saveBackendUrl}>Use</button>
+            <button onClick={resetBackendUrl}>Reset</button>
+          </div>
         </div>
 
         <div className="command-status">
@@ -1715,6 +1807,7 @@ function App() {
             Board {selectedBoardName}
           </span>
           <span className="status-pill status-pill-info">Port {selectedPort}</span>
+          <span className="status-pill status-pill-info">Backend {backendHostLabel}</span>
         </div>
 
         <div className="command-actions">
