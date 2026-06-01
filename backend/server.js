@@ -526,7 +526,7 @@ function aiResponseProject(project, fqbn, installResults, repaired) {
   };
 }
 
-app.get("/cores", (req, rATH=/home/shaes) => {
+app.get("/cores", (req, res) => {
   runArduinoCli(
     ["core", "list", "--format", "json"],
     (code, stdout, stderr) => {
