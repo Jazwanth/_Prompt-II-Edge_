@@ -98,6 +98,10 @@ function requestNumber(value, fallback) {
   return Number.isFinite(number) && number > 0 ? number : fallback;
 }
 
+function requestBoolean(value, fallback = false) {
+  return typeof value === "boolean" ? value : fallback;
+}
+
 function sketchContent(value) {
   return typeof value === "string" ? value : "";
 }
@@ -176,6 +180,14 @@ function getSerialStatusPayload() {
     port: activeSerialPath,
     baudRate: activeSerialBaudRate,
   };
+}
+
+function getSerialLineEnding(lineEnding, appendNewline) {
+  if (lineEnding === "crlf") return "\r\n";
+  if (lineEnding === "cr") return "\r";
+  if (lineEnding === "none") return "";
+
+  return appendNewline ? "\n" : "";
 }
 
 function sendSerialStatus(ws) {
@@ -1041,6 +1053,47 @@ app.post("/serial/start", (req, res) => {
 
 app.get("/serial/status", (req, res) => {
   res.json(getSerialStatusPayload());
+});
+
+app.post("/serial/write", (req, res) => {
+  if (!isSerialOpen()) {
+    return res.status(400).json({
+      success: false,
+      error: "Serial monitor is not connected.",
+    });
+  }
+
+  const message =
+    typeof req.body.message === "string" ? req.body.message.slice(0, 4096) : "";
+  const lineEnding = requestString(req.body.lineEnding, "");
+  const appendNewline = requestBoolean(req.body.appendNewline, true);
+
+  if (!message && getSerialLineEnding(lineEnding, appendNewline) === "") {
+    return res.status(400).json({
+      success: false,
+      error: "Message is required.",
+    });
+  }
+
+  const payload = message + getSerialLineEnding(lineEnding, appendNewline);
+
+  serialPort.write(payload, (error) => {
+    if (error) {
+      return res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+
+    serialPort.drain(() => {
+      sendToClients(`[Serial write] ${JSON.stringify(payload)}\n`);
+
+      res.json({
+        success: true,
+        bytesWritten: Buffer.byteLength(payload),
+      });
+    });
+  });
 });
 
 app.post("/serial/stop", (req, res) => {

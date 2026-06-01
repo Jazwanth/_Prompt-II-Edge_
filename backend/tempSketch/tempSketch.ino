@@ -13,11 +13,8 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("OLED display test started!");
-
-  // Initialize I2C bus with default pins (GPIO21 SDA, GPIO22 SCL)
-  // Wire.begin() is called by display.begin() if not explicitly called before.
-  // If you need custom pins, use Wire.begin(SDA_PIN, SCL_PIN);
+  Serial.println("OLED display project started!");
+  Serial.println("Enter a message in the Serial Monitor to display it on the OLED.");
 
   // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3C for 128x64
@@ -30,24 +27,45 @@ void setup() {
   // Clear the buffer
   display.clearDisplay();
 
-  // Set text size
-  display.setTextSize(2); // Draw 2X-scale text
-
-  // Set text color
+  // Set text size and color (can be changed later)
+  display.setTextSize(1); // Default text size
   display.setTextColor(SSD1306_WHITE); // Draw white text
 
-  // Set cursor position
-  display.setCursor(0, 0); // Start at top-left corner
-
-  // Print text to the display buffer
-  display.println("HI");
-
-  // Display the buffer content
+  // Initial message
+  display.setCursor(0, 0);
+  display.println("Hello!");
+  display.println("Send text via");
+  display.println("Serial Monitor");
   display.display();
-  Serial.println("Displayed 'HI' on OLED.");
 }
 
 void loop() {
-  // Nothing to do in the loop for this simple example
-  // The message "HI" is displayed once in setup.
+  if (Serial.available()) {
+    String message = Serial.readStringUntil('\n'); // Read until newline character
+    message.trim(); // Remove any leading/trailing whitespace
+
+    if (message.length() > 0) {
+      Serial.print("Received message: ");
+      Serial.println(message);
+
+      display.clearDisplay(); // Clear the display buffer
+      display.setCursor(0, 0); // Set cursor to top-left
+
+      // Adjust text size based on message length for better fit
+      if (message.length() > 20) {
+        display.setTextSize(1);
+      } else if (message.length() > 10) {
+        display.setTextSize(2);
+      } else {
+        display.setTextSize(3);
+      }
+      
+      display.println(message); // Print the new message
+      display.display(); // Show the buffer content on the OLED
+      Serial.println("Message displayed on OLED.");
+    } else {
+      Serial.println("Empty message received, not updating OLED.");
+    }
+  }
+  delay(100); // Small delay to prevent busy-waiting
 }

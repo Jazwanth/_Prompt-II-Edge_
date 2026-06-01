@@ -1,6 +1,6 @@
 .ide-shell {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) 264px;
+  grid-template-rows: auto minmax(0, 1fr) var(--dock-height, 264px);
   gap: 10px;
   width: 100%;
   height: 100vh;
@@ -19,8 +19,8 @@
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
-  box-shadow: var(--shadow);
-  backdrop-filter: blur(18px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.24);
+  contain: layout paint;
 }
 
 .command-bar {
@@ -192,11 +192,85 @@
 }
 
 .ide-main {
+  position: relative;
   display: grid;
-  grid-template-columns: 250px minmax(0, 1fr) 330px;
+  grid-template-columns: var(--left-sidebar-width, 250px) minmax(0, 1fr) var(--right-sidebar-width, 330px);
   gap: 10px;
   min-height: 0;
   overflow: hidden;
+}
+
+.resize-handle,
+.dock-resize-handle {
+  position: absolute;
+  z-index: 15;
+  background: transparent;
+}
+
+.resize-handle {
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.resize-handle::after,
+.dock-resize-handle::after {
+  content: "";
+  position: absolute;
+  background: rgba(56, 189, 248, 0);
+  border-radius: 999px;
+  transition: background 120ms ease;
+}
+
+.resize-handle::after {
+  inset: 12px 4px;
+}
+
+.resize-handle:hover::after,
+.dock-resize-handle:hover::after,
+body.is-resizing .resize-handle::after,
+body.is-resizing .dock-resize-handle::after {
+  background: rgba(56, 189, 248, 0.42);
+}
+
+.resize-handle-left {
+  left: calc(var(--left-sidebar-width, 250px) + 5px);
+  transform: translateX(-50%);
+}
+
+.resize-handle-right {
+  right: calc(var(--right-sidebar-width, 330px) + 5px);
+  transform: translateX(50%);
+}
+
+body.is-resizing {
+  user-select: none;
+}
+
+body.is-resizing-columns {
+  cursor: col-resize;
+}
+
+body.is-resizing-dock {
+  cursor: row-resize;
+}
+
+.resize-capture-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: transparent;
+  touch-action: none;
+}
+
+.resize-capture-layer-columns {
+  cursor: col-resize;
+}
+
+.resize-capture-layer-dock {
+  cursor: row-resize;
 }
 
 .left-sidebar,
@@ -395,6 +469,7 @@
 .assistant-input,
 .wiring-notes {
   min-height: 96px;
+  resize: vertical;
 }
 
 .ai-step-list {
@@ -579,9 +654,29 @@
 }
 
 .bottom-dock {
+  position: relative;
   display: grid;
   grid-template-rows: 40px minmax(0, 1fr);
-  overflow: hidden;
+  overflow: visible;
+  contain: layout;
+}
+
+.dock-resize-handle {
+  top: -10px;
+  left: 0;
+  right: 0;
+  height: 10px;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.dock-resize-handle::after {
+  left: 12px;
+  right: 12px;
+  top: 2px;
+  width: auto;
+  height: 3px;
+  transform: none;
 }
 
 .dock-tabs {
@@ -634,7 +729,7 @@
 
 .serial-tool {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 8px;
   height: 100%;
   min-height: 0;
@@ -647,6 +742,17 @@
 
 .serial-toolbar select {
   width: 142px;
+}
+
+.serial-send-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) 118px auto;
+  gap: 8px;
+  min-width: 0;
+}
+
+.serial-ending-select {
+  min-width: 0;
 }
 
 .serial-content {
@@ -728,10 +834,6 @@
   .command-status {
     display: none;
   }
-
-  .ide-main {
-    grid-template-columns: 230px minmax(0, 1fr) 300px;
-  }
 }
 
 @media (max-width: 1080px) {
@@ -747,9 +849,6 @@
     justify-content: flex-start;
   }
 
-  .ide-main {
-    grid-template-columns: 210px minmax(0, 1fr) 270px;
-  }
 }
 
 @media (max-width: 860px) {
@@ -762,6 +861,15 @@
 
   .ide-main,
   .log-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .resize-handle,
+  .dock-resize-handle {
+    display: none;
+  }
+
+  .serial-send-row {
     grid-template-columns: 1fr;
   }
 

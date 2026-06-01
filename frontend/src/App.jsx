@@ -49,28 +49,35 @@ void loop() {
 
 const PROJECTS_KEY = "webArduinoIDE_projects";
 const AUTOSAVE_KEY = "webArduinoIDE_autosave_tabs";
+const LAYOUT_KEY = "webArduinoIDE_layout_sizes";
 const MAIN_FILE = "tempSketch.ino";
 const AUTOSAVE_DELAY_MS = 500;
-const MAX_SERIAL_CHARS = 30000;
-const MAX_PLOT_POINTS = 80;
-const SERIAL_FLUSH_MS = 100;
+const MAX_SERIAL_CHARS = 22000;
+const MAX_PLOT_POINTS = 64;
+const SERIAL_FLUSH_MS = 180;
 const DEFAULT_BAUD_RATE = 115200;
 const ALLOWED_FILE_EXTENSIONS = [".ino", ".cpp", ".c", ".h", ".hpp", ".txt"];
 const SERIAL_BAUD_RATES = [9600, 19200, 38400, 57600, 74880, 115200, 230400, 921600];
 const AI_STEPS = ["Thinking", "Writing code", "Installing libraries", "Compiling", "Ready"];
+const DEFAULT_LAYOUT_SIZES = {
+  left: 250,
+  right: 330,
+  dock: 264,
+};
 
 const EDITOR_OPTIONS = {
   automaticLayout: true,
   minimap: { enabled: false },
-  renderWhitespace: "selection",
+  renderWhitespace: "none",
   scrollBeyondLastLine: false,
-  smoothScrolling: true,
+  smoothScrolling: false,
 };
 
 const PLOT_OPTIONS = {
   responsive: true,
   animation: false,
   maintainAspectRatio: false,
+  normalized: true,
   plugins: {
     legend: {
       labels: {
@@ -103,6 +110,7 @@ const PLOT_COLORS = [
 ];
 
 const PLOTTER_IGNORED_LINE_PATTERNS = [
+  /^\[Serial /i,
   /^ets\s/i,
   /^rst:/i,
   /^configsip:/i,
@@ -149,6 +157,10 @@ function getFileExtension(name) {
 
 function isAllowedFileName(name) {
   return ALLOWED_FILE_EXTENSIONS.includes(getFileExtension(name));
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
 }
 
 function normalizeFiles(files) {
@@ -206,6 +218,21 @@ function readStoredProjects() {
       : {};
   } catch {
     return {};
+  }
+}
+
+function readStoredLayoutSizes() {
+  try {
+    const raw = localStorage.getItem(LAYOUT_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+
+    return {
+      left: clamp(Number(parsed.left) || DEFAULT_LAYOUT_SIZES.left, 180, 430),
+      right: clamp(Number(parsed.right) || DEFAULT_LAYOUT_SIZES.right, 250, 540),
+      dock: clamp(Number(parsed.dock) || DEFAULT_LAYOUT_SIZES.dock, 180, 480),
+    };
+  } catch {
+    return DEFAULT_LAYOUT_SIZES;
   }
 }
 
@@ -291,6 +318,8 @@ const SerialConsole = memo(function SerialConsole({ selectedPort, activeView }) 
   const [serialData, setSerialData] = useState("");
   const [isSerialConnected, setIsSerialConnected] = useState(false);
   const [baudRate, setBaudRate] = useState(DEFAULT_BAUD_RATE);
+  const [serialMessage, setSerialMessage] = useState("");
+  const [serialLineEnding, setSerialLineEnding] = useState("lf");
   const [plotRows, setPlotRows] = useState([]);
 
   const pointCounterRef = useRef(0);
@@ -476,6 +505,34 @@ const SerialConsole = memo(function SerialConsole({ selectedPort, activeView }) 
     setPlotRows([]);
   }, []);
 
+  const sendSerialMessage = useCallback(async () => {
+    try {
+      await axios.post("http://localhost:5000/serial/write", {
+        message: serialMessage,
+        lineEnding: serialLineEnding,
+        appendNewline: serialLineEnding !== "none",
+      });
+
+      setSerialMessage("");
+    } catch (err) {
+      queueSerialData(
+        "\n[Serial write error] " +
+          formatApiError(err) +
+          "\n"
+      );
+    }
+  }, [queueSerialData, serialLineEnding, serialMessage]);
+
+  const handleSerialMessageKeyDown = useCallback(
+    (event) => {
+      if (event.key !== "Enter" || event.shiftKey) return;
+
+      event.preventDefault();
+      sendSerialMessage();
+    },
+    [sendSerialMessage]
+  );
+
   const plotData = useMemo(
     () => {
       const seriesNames = Array.from(
@@ -538,6 +595,36 @@ const SerialConsole = memo(function SerialConsole({ selectedPort, activeView }) 
         >
           Serial {isSerialConnected ? "Connected" : "Disconnected"}
         </span>
+      </div>
+
+      <div className="serial-send-row">
+        <input
+          value={serialMessage}
+          onChange={(event) => setSerialMessage(event.target.value)}
+          onKeyDown={handleSerialMessageKeyDown}
+          placeholder="Send message to board"
+          aria-label="Serial message"
+        />
+
+        <select
+          value={serialLineEnding}
+          onChange={(event) => setSerialLineEnding(event.target.value)}
+          aria-label="Serial line ending"
+          className="serial-ending-select"
+        >
+          <option value="lf">Newline</option>
+          <option value="crlf">CRLF</option>
+          <option value="cr">CR</option>
+          <option value="none">No ending</option>
+        </select>
+
+        <button
+          className="primary-action"
+          onClick={sendSerialMessage}
+          disabled={!isSerialConnected}
+        >
+          Send
+        </button>
       </div>
 
       <div className="serial-content">
@@ -631,6 +718,8 @@ function App() {
   const [aiWarnings, setAiWarnings] = useState([]);
   const [aiExplanation, setAiExplanation] = useState("");
   const [showAiUploadModal, setShowAiUploadModal] = useState(false);
+  const [layoutSizes, setLayoutSizes] = useState(readStoredLayoutSizes);
+  const [activeResizePanel, setActiveResizePanel] = useState("");
 
   const [files, setFiles] = useState(readStoredFiles);
 
@@ -641,6 +730,7 @@ function App() {
 
   const fileInputRef = useRef(null);
   const latestFilesRef = useRef(files);
+  const resizeStateRef = useRef(null);
 
   const currentFile = useMemo(
     () => files.find((file) => file.name === activeFile) || files[0],
@@ -648,6 +738,144 @@ function App() {
   );
 
   const currentCode = currentFile?.content || "";
+
+  const stopPanelResize = useCallback(() => {
+    resizeStateRef.current = null;
+    setActiveResizePanel("");
+    document.body.classList.remove("is-resizing");
+    document.body.classList.remove("is-resizing-dock");
+    document.body.classList.remove("is-resizing-columns");
+  }, []);
+
+  const applyPanelResize = useCallback((clientX, clientY) => {
+    const resizeState = resizeStateRef.current;
+
+    if (!resizeState) return;
+
+    const deltaX = clientX - resizeState.startX;
+    const deltaY = clientY - resizeState.startY;
+
+    setLayoutSizes((prev) => {
+      if (resizeState.panel === "left") {
+        const maxLeft = Math.max(
+          180,
+          Math.min(430, resizeState.mainWidth - resizeState.right - 340)
+        );
+
+        return {
+          ...prev,
+          left: clamp(resizeState.left + deltaX, 180, maxLeft),
+        };
+      }
+
+      if (resizeState.panel === "right") {
+        const maxRight = Math.max(
+          250,
+          Math.min(540, resizeState.mainWidth - resizeState.left - 340)
+        );
+
+        return {
+          ...prev,
+          right: clamp(resizeState.right - deltaX, 250, maxRight),
+        };
+      }
+
+      if (resizeState.panel === "dock") {
+        const maxDock = Math.max(
+          180,
+          Math.min(480, resizeState.shellHeight - 260)
+        );
+
+        return {
+          ...prev,
+          dock: clamp(resizeState.dock - deltaY, 180, maxDock),
+        };
+      }
+
+      return prev;
+    });
+  }, []);
+
+  const startPanelResize = useCallback(
+    (panel, event) => {
+      event.preventDefault();
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+
+      resizeStateRef.current = {
+        panel,
+        startX: event.clientX,
+        startY: event.clientY,
+        mainWidth:
+          document.querySelector(".ide-main")?.clientWidth || window.innerWidth,
+        shellHeight:
+          document.querySelector(".ide-shell")?.clientHeight ||
+          window.innerHeight,
+        ...layoutSizes,
+      };
+
+      setActiveResizePanel(panel);
+      document.body.classList.add("is-resizing");
+      document.body.classList.toggle("is-resizing-dock", panel === "dock");
+      document.body.classList.toggle("is-resizing-columns", panel !== "dock");
+    },
+    [layoutSizes]
+  );
+
+  useEffect(() => {
+    const handlePointerMove = (event) => {
+      applyPanelResize(event.clientX, event.clientY);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopPanelResize);
+    window.addEventListener("pointercancel", stopPanelResize);
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopPanelResize);
+      window.removeEventListener("pointercancel", stopPanelResize);
+      resizeStateRef.current = null;
+      document.body.classList.remove("is-resizing");
+      document.body.classList.remove("is-resizing-dock");
+      document.body.classList.remove("is-resizing-columns");
+    };
+  }, [applyPanelResize, stopPanelResize]);
+
+  useEffect(() => {
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify(layoutSizes));
+  }, [layoutSizes]);
+
+  useEffect(() => {
+    const constrainLayout = () => {
+      const mainWidth =
+        document.querySelector(".ide-main")?.clientWidth || window.innerWidth;
+      const shellHeight =
+        document.querySelector(".ide-shell")?.clientHeight ||
+        window.innerHeight;
+
+      setLayoutSizes((prev) => {
+        const maxLeft = Math.max(180, Math.min(430, mainWidth - prev.right - 340));
+        const left = clamp(prev.left, 180, maxLeft);
+        const maxRight = Math.max(250, Math.min(540, mainWidth - left - 340));
+        const right = clamp(prev.right, 250, maxRight);
+        const maxDock = Math.max(180, Math.min(480, shellHeight - 260));
+        const dock = clamp(prev.dock, 180, maxDock);
+
+        if (left === prev.left && right === prev.right && dock === prev.dock) {
+          return prev;
+        }
+
+        return { left, right, dock };
+      });
+    };
+
+    constrainLayout();
+    window.addEventListener("resize", constrainLayout);
+
+    return () => {
+      window.removeEventListener("resize", constrainLayout);
+    };
+  }, []);
 
   useEffect(() => {
     if (!aiIsGenerating) return undefined;
@@ -1419,7 +1647,14 @@ function App() {
   ];
 
   return (
-    <div className="ide-shell">
+    <div
+      className="ide-shell"
+      style={{
+        "--left-sidebar-width": `${layoutSizes.left}px`,
+        "--right-sidebar-width": `${layoutSizes.right}px`,
+        "--dock-height": `${layoutSizes.dock}px`,
+      }}
+    >
       <header className="command-bar glass-panel">
         <div className="project-identity">
           <div className="brand-mark">
@@ -1983,9 +2218,30 @@ function App() {
             )}
           </div>
         </aside>
+
+        <div
+          className="resize-handle resize-handle-left"
+          onPointerDown={(event) => startPanelResize("left", event)}
+          role="separator"
+          aria-label="Resize project sidebar"
+        />
+
+        <div
+          className="resize-handle resize-handle-right"
+          onPointerDown={(event) => startPanelResize("right", event)}
+          role="separator"
+          aria-label="Resize tools sidebar"
+        />
       </main>
 
       <section className="bottom-dock glass-panel">
+        <div
+          className="dock-resize-handle"
+          onPointerDown={(event) => startPanelResize("dock", event)}
+          role="separator"
+          aria-label="Resize bottom panel"
+        />
+
         <div className="dock-tabs">
           {dockTabs.map((tab) => (
             <button
@@ -2049,6 +2305,23 @@ function App() {
           </div>
         </div>
       </section>
+
+      {activeResizePanel && (
+        <div
+          className={[
+            "resize-capture-layer",
+            activeResizePanel === "dock"
+              ? "resize-capture-layer-dock"
+              : "resize-capture-layer-columns",
+          ].join(" ")}
+          aria-hidden="true"
+          onPointerMove={(event) =>
+            applyPanelResize(event.clientX, event.clientY)
+          }
+          onPointerUp={stopPanelResize}
+          onPointerCancel={stopPanelResize}
+        />
+      )}
 
       {showAiUploadModal && (
         <div className="modal-backdrop" role="dialog" aria-modal="true">
