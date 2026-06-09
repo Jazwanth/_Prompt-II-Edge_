@@ -5,6 +5,9 @@
   "observability": {
     "enabled": true
   },
+  "build": {
+    "command": "npm --prefix frontend ci && npm --prefix frontend run build"
+  },
   "assets": {
     "directory": "frontend/dist",
     "not_found_handling": "single-page-application"
