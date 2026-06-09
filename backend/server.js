@@ -41,6 +41,25 @@ const DEFAULT_OTA_PASSWORD = "";
 const BOARD_LIST_CACHE_MS = 5 * 60 * 1000;
 const SERVER_HOST = process.env.HOST || "127.0.0.1";
 const SERVER_PORT = Number(process.env.PORT) || 5000;
+const CANONICAL_LOCAL_HOST = process.env.LOCAL_URL_HOST || "localhost";
+
+app.use((req, res, next) => {
+  const host = req.headers.host || "";
+  const acceptsHtml = (req.headers.accept || "").includes("text/html");
+
+  if (
+    req.method === "GET" &&
+    acceptsHtml &&
+    host.startsWith("127.0.0.1:")
+  ) {
+    return res.redirect(
+      302,
+      `http://${CANONICAL_LOCAL_HOST}:${SERVER_PORT}${req.originalUrl}`
+    );
+  }
+
+  next();
+});
 
 let serialPort = null;
 let activeSerialPath = DEFAULT_PORT;

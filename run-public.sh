@@ -11,9 +11,14 @@ ARDUINO_DIR="$TOOLS_DIR/arduino"
 NODE_MAJOR="${NODE_MAJOR:-22}"
 PORT="${PORT:-5000}"
 HOST="${HOST:-127.0.0.1}"
+LOCAL_URL_HOST="${LOCAL_URL_HOST:-localhost}"
 OPEN_URL="${OPEN_URL:-1}"
+LOCAL_FALLBACK="${LOCAL_FALLBACK:-1}"
 SETUP_ESP32="${SETUP_ESP32:-1}"
 ESP32_PACKAGE_URL="${ESP32_PACKAGE_URL:-https://espressif.github.io/arduino-esp32/package_esp32_index.json}"
+TUNNEL_ATTEMPTS="${TUNNEL_ATTEMPTS:-1}"
+TUNNEL_WAIT_SECONDS="${TUNNEL_WAIT_SECONDS:-75}"
+TUNNEL_PROTOCOL="${TUNNEL_PROTOCOL:-http2}"
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/prompt2edge.XXXXXX")"
 BACKEND_LOG="$RUN_DIR/backend.log"
 FRONTEND_BUILD_LOG="$RUN_DIR/frontend-build.log"
@@ -26,6 +31,8 @@ ARDUINO_CLI_SETUP_LOG="$RUN_DIR/arduino-cli-setup.log"
 TUNNEL_LOG="$RUN_DIR/tunnel.log"
 BACKEND_PID=""
 TUNNEL_PID=""
+NAMED_TUNNEL_TOKEN=""
+CONFIGURED_PUBLIC_URL=""
 STARTED_BACKEND=0
 KEEP_LOGS=0
 
@@ -58,8 +65,13 @@ fail() {
   exit 1
 }
 
+status() {
+  printf '%s\n' "$1" >&2
+}
+
 trap cleanup EXIT INT TERM
 
+status "Checking required tools..."
 command -v curl >/dev/null 2>&1 || fail "curl is not installed or not on PATH"
 
 download_node() {
@@ -121,12 +133,40 @@ env_value() {
   ' "$file"
 }
 
+set_env_value() {
+  local key="$1"
+  local value="$2"
+  local file="$3"
+  local tmp="$RUN_DIR/env.$key"
+
+  if [[ -f "$file" ]]; then
+    awk -v key="$key" -v value="$value" '
+      BEGIN { updated = 0 }
+      $0 ~ "^" key "=" {
+        print key "=" value
+        updated = 1
+        next
+      }
+      { print }
+      END {
+        if (!updated) {
+          print key "=" value
+        }
+      }
+    ' "$file" >"$tmp"
+  else
+    printf '%s=%s\n' "$key" "$value" >"$tmp"
+  fi
+
+  mv "$tmp" "$file"
+}
+
 ensure_env_file() {
   local env_file="$BACKEND_DIR/.env"
   local key_value model_value
 
   if [[ ! -f "$env_file" ]]; then
-    cp "$BACKEND_DIR/.env.example" "$env_file"
+    : >"$env_file"
     chmod 600 "$env_file" 2>/dev/null || true
   fi
 
@@ -150,12 +190,25 @@ ensure_env_file() {
   model_value="$(env_value GEMINI_MODEL "$env_file")"
   [[ -n "$model_value" ]] || model_value="${GEMINI_MODEL:-gemini-2.5-flash}"
 
-  {
-    printf 'GEMINI_API_KEY=%s\n' "$key_value"
-    printf 'GEMINI_MODEL=%s\n' "$model_value"
-  } >"$env_file"
+  set_env_value GEMINI_API_KEY "$key_value" "$env_file"
+  set_env_value GEMINI_MODEL "$model_value" "$env_file"
 
   chmod 600 "$env_file" 2>/dev/null || true
+}
+
+load_tunnel_config() {
+  local env_file="$BACKEND_DIR/.env"
+
+  NAMED_TUNNEL_TOKEN="${CLOUDFLARED_TUNNEL_TOKEN:-}"
+  CONFIGURED_PUBLIC_URL="${PUBLIC_URL:-}"
+
+  [[ -n "$NAMED_TUNNEL_TOKEN" ]] ||
+    NAMED_TUNNEL_TOKEN="$(env_value CLOUDFLARED_TUNNEL_TOKEN "$env_file")"
+
+  [[ -n "$CONFIGURED_PUBLIC_URL" ]] ||
+    CONFIGURED_PUBLIC_URL="$(env_value PUBLIC_URL "$env_file")"
+
+  CONFIGURED_PUBLIC_URL="${CONFIGURED_PUBLIC_URL%/}"
 }
 
 open_public_url() {
@@ -181,6 +234,22 @@ publish_url() {
   printf '%s\n' "$url"
   wait "$TUNNEL_PID"
   exit $?
+}
+
+publish_local_url() {
+  local url="http://$LOCAL_URL_HOST:$PORT"
+
+  status "Could not create a reachable Cloudflare URL. Opening local URL instead..."
+  open_public_url "$url"
+  printf '%s\n' "$url"
+
+  if [[ "$STARTED_BACKEND" == "1" && -n "$BACKEND_PID" ]]; then
+    wait "$BACKEND_PID"
+  else
+    while true; do
+      sleep 3600
+    done
+  fi
 }
 
 download_cloudflared() {
@@ -247,17 +316,32 @@ backend_ready() {
     curl -fsS --max-time 2 "http://$HOST:$PORT/" | grep -q 'id="root"'
 }
 
+public_url_ready() {
+  local url="$1"
+
+  curl -fsS --max-time 5 "$url/serial/status" >/dev/null 2>&1 &&
+    curl -fsS --max-time 5 "$url/" | grep -q 'id="root"'
+}
+
 command -v cloudflared >/dev/null 2>&1 || download_cloudflared
 command -v arduino-cli >/dev/null 2>&1 || download_arduino_cli
 command -v cloudflared >/dev/null 2>&1 || fail "cloudflared is not available"
 command -v arduino-cli >/dev/null 2>&1 || fail "arduino-cli is not available"
 
+status "Checking Gemini backend configuration..."
 ensure_env_file
+
+status "Preparing Arduino CLI. First run may download large board support files..."
 setup_arduino_cli
+
+status "Installing backend/frontend dependencies if needed..."
 install_node_deps "$BACKEND_DIR" "$BACKEND_INSTALL_LOG"
 install_node_deps "$FRONTEND_DIR" "$FRONTEND_INSTALL_LOG"
+
+status "Building frontend..."
 npm --prefix "$FRONTEND_DIR" run build >"$FRONTEND_BUILD_LOG" 2>&1 || fail "frontend build failed"
 
+status "Starting backend..."
 if curl -fsS --max-time 2 "http://$HOST:$PORT/serial/status" >/dev/null 2>&1; then
   backend_ready ||
     fail "port $PORT is already in use by a server that is not serving this project"
@@ -286,31 +370,91 @@ fi
 backend_ready ||
   fail "backend did not start on http://$HOST:$PORT"
 
-cloudflared tunnel --url "http://$HOST:$PORT" >"$TUNNEL_LOG" 2>&1 &
-TUNNEL_PID="$!"
+load_tunnel_config
 
+if [[ -n "$NAMED_TUNNEL_TOKEN" ]]; then
+  [[ -n "$CONFIGURED_PUBLIC_URL" ]] ||
+    fail "CLOUDFLARED_TUNNEL_TOKEN is set, but PUBLIC_URL is missing in backend/.env"
+
+  status "Starting configured Cloudflare Tunnel..."
+  : >"$TUNNEL_LOG"
+  cloudflared tunnel --protocol "$TUNNEL_PROTOCOL" --no-autoupdate run --token "$NAMED_TUNNEL_TOKEN" >"$TUNNEL_LOG" 2>&1 &
+  TUNNEL_PID="$!"
+
+  status "Waiting for configured Cloudflare hostname..."
+  for second in $(seq 1 "$TUNNEL_WAIT_SECONDS"); do
+    if public_url_ready "$CONFIGURED_PUBLIC_URL"; then
+      publish_url "$CONFIGURED_PUBLIC_URL"
+    fi
+
+    if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+      fail "configured Cloudflare Tunnel stopped while starting"
+    fi
+
+    if (( second % 30 == 0 )); then
+      status "Still waiting for configured Cloudflare hostname..."
+    fi
+
+    sleep 1
+  done
+
+  status "Configured Cloudflare hostname was not reachable."
+  if [[ "$LOCAL_FALLBACK" == "1" ]]; then
+    publish_local_url
+  fi
+
+  fail "could not reach configured Cloudflare hostname"
+fi
+
+status "Creating public Cloudflare URL..."
 PUBLIC_URL=""
 
-for _ in {1..90}; do
-  PUBLIC_URL="$(grep -Eo 'https://[-a-z0-9]+\.trycloudflare\.com' "$TUNNEL_LOG" | head -n 1 || true)"
+for attempt in $(seq 1 "$TUNNEL_ATTEMPTS"); do
+  reported_url=""
+  : >"$TUNNEL_LOG"
+  cloudflared tunnel --protocol "$TUNNEL_PROTOCOL" --url "http://$HOST:$PORT" >"$TUNNEL_LOG" 2>&1 &
+  TUNNEL_PID="$!"
 
-  if [[ -n "$PUBLIC_URL" ]]; then
-    for _ in {1..30}; do
-      if curl -fsS --max-time 5 "$PUBLIC_URL/serial/status" >/dev/null 2>&1; then
-        publish_url "$PUBLIC_URL"
+  for second in $(seq 1 "$TUNNEL_WAIT_SECONDS"); do
+    PUBLIC_URL="$(grep -Eo 'https://[-a-z0-9]+\.trycloudflare\.com' "$TUNNEL_LOG" | head -n 1 || true)"
+
+    if [[ -n "$PUBLIC_URL" ]]; then
+      if [[ "$reported_url" != "$PUBLIC_URL" ]]; then
+        status "Cloudflare created $PUBLIC_URL. Waiting for DNS to become reachable..."
+        reported_url="$PUBLIC_URL"
+      elif (( second % 30 == 0 )); then
+        status "Still waiting for Cloudflare DNS..."
       fi
 
-      sleep 1
-    done
+      if public_url_ready "$PUBLIC_URL"; then
+        publish_url "$PUBLIC_URL"
+      fi
+    fi
 
-    publish_url "$PUBLIC_URL"
+    if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+      break
+    fi
+
+    sleep 1
+  done
+
+  if kill -0 "$TUNNEL_PID" 2>/dev/null; then
+    kill "$TUNNEL_PID" 2>/dev/null || true
+    wait "$TUNNEL_PID" 2>/dev/null || true
   fi
 
-  if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
-    fail "cloudflared stopped while starting"
-  fi
+  TUNNEL_PID=""
 
-  sleep 1
+  if (( attempt < TUNNEL_ATTEMPTS )); then
+    status "Cloudflare URL was not reachable. Retrying tunnel ($attempt/$TUNNEL_ATTEMPTS)..."
+    sleep 2
+  else
+    status "Cloudflare URL was not reachable."
+  fi
 done
 
-fail "could not get Cloudflare tunnel URL"
+if [[ "$LOCAL_FALLBACK" == "1" ]]; then
+  publish_local_url
+fi
+
+fail "could not get a reachable Cloudflare tunnel URL"

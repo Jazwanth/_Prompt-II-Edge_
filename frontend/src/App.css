@@ -1,6 +1,6 @@
 .ide-shell {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) var(--dock-height, 264px);
+  grid-template-rows: auto minmax(0, 1fr) var(--dock-height, 286px);
   gap: 10px;
   width: 100%;
   height: 100vh;
@@ -25,10 +25,10 @@
 
 .command-bar {
   display: grid;
-  grid-template-columns: minmax(220px, 280px) minmax(360px, 1fr) minmax(180px, auto) minmax(320px, auto);
+  grid-template-columns: minmax(220px, 250px) minmax(380px, 1fr) minmax(280px, auto) minmax(350px, auto);
   gap: 10px;
   align-items: center;
-  padding: 10px;
+  padding: 6px 10px;
 }
 
 .project-identity,
@@ -115,13 +115,24 @@
 }
 
 .command-status {
-  min-width: 0;
+  min-width: 260px;
   justify-content: flex-start;
+}
+
+.command-status .status-pill {
+  padding-inline: 8px;
+  font-size: 11px;
 }
 
 .command-actions {
   justify-content: flex-end;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+.command-actions button {
+  min-width: 0;
+  padding-inline: 10px;
 }
 
 .ota-input {
@@ -194,7 +205,7 @@
 .ide-main {
   position: relative;
   display: grid;
-  grid-template-columns: var(--left-sidebar-width, 250px) minmax(0, 1fr) var(--right-sidebar-width, 330px);
+  grid-template-columns: var(--left-sidebar-width, 238px) minmax(0, 1fr) var(--right-sidebar-width, 294px);
   gap: 10px;
   min-height: 0;
   overflow: hidden;
@@ -236,12 +247,12 @@ body.is-resizing .dock-resize-handle::after {
 }
 
 .resize-handle-left {
-  left: calc(var(--left-sidebar-width, 250px) + 5px);
+  left: calc(var(--left-sidebar-width, 238px) + 5px);
   transform: translateX(-50%);
 }
 
 .resize-handle-right {
-  right: calc(var(--right-sidebar-width, 330px) + 5px);
+  right: calc(var(--right-sidebar-width, 294px) + 5px);
   transform: translateX(50%);
 }
 
@@ -345,6 +356,11 @@ body.is-resizing-dock {
   gap: 8px;
 }
 
+.action-grid button {
+  font-size: 14px;
+  white-space: nowrap;
+}
+
 .button-row,
 .search-row {
   flex-wrap: wrap;
@@ -355,6 +371,37 @@ body.is-resizing-dock {
   gap: 8px;
 }
 
+.backend-advanced-section {
+  order: 20;
+}
+
+.backend-advanced-section summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 3px;
+  color: var(--heading);
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.backend-advanced-section summary span {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.backend-advanced-section summary small {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backend-advanced-section .backend-settings {
+  margin-top: 10px;
+}
+
 .backend-settings input {
   width: 100%;
   min-width: 0;
@@ -363,6 +410,13 @@ body.is-resizing-dock {
 .button-row > button,
 .search-row > button {
   flex: 0 0 auto;
+}
+
+.right-sidebar .button-row button,
+.right-sidebar .search-row button {
+  padding-inline: 10px;
+  font-size: 14px;
+  white-space: nowrap;
 }
 
 .search-row input {
@@ -838,27 +892,76 @@ body.is-resizing-dock {
 
 @media (max-width: 1320px) {
   .command-bar {
-    grid-template-columns: minmax(220px, 280px) minmax(320px, 1fr) minmax(320px, auto);
+    grid-template-columns: minmax(190px, 230px) minmax(300px, 1fr) minmax(280px, auto) minmax(340px, auto);
+    gap: 8px;
   }
 
   .command-status {
-    display: none;
+    display: flex;
+  }
+
+  .status-pill {
+    max-width: none;
+  }
+
+  .brand-mark {
+    width: 96px;
+    height: 38px;
   }
 }
 
-@media (max-width: 1080px) {
+@media (max-width: 1180px) {
   .ide-shell {
-    grid-template-rows: auto minmax(0, 1fr) 252px;
+    grid-template-rows: auto minmax(0, 1fr) min(286px, var(--dock-height, 286px));
   }
 
+  .command-bar {
+    grid-template-columns: minmax(180px, 210px) minmax(250px, 1fr) minmax(270px, auto) minmax(310px, auto);
+    gap: 8px;
+  }
+
+  .brand-mark {
+    width: 86px;
+    height: 36px;
+  }
+
+  .project-title-field span,
+  .compact-field span {
+    font-size: 10px;
+  }
+
+  .status-pill {
+    max-width: none;
+    padding-inline: 7px;
+    font-size: 11px;
+  }
+
+  .command-actions {
+    flex-wrap: nowrap;
+  }
+}
+
+@media (max-width: 980px) {
   .command-bar {
     grid-template-columns: 1fr;
   }
 
+  .project-identity,
+  .command-selects,
+  .command-status,
   .command-actions {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
+  .command-status {
     justify-content: flex-start;
   }
 
+  .command-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
 }
 
 @media (max-width: 860px) {

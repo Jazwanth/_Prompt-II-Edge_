@@ -3,5 +3,6 @@
 .tools
 .dev.vars*
 !.dev.vars.example
+
+# Local secrets
 .env*
-!.env.example

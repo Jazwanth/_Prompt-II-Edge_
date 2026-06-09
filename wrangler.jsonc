@@ -1,14 +1,12 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "prompt2edge",
-  "compatibility_date": "2026-06-01",
+  "compatibility_date": "2026-06-09",
   "observability": {
     "enabled": true
   },
   "assets": {
-    "directory": "frontend"
-  },
-  "compatibility_flags": [
-    "nodejs_compat"
-  ]
+    "directory": "frontend/dist",
+    "not_found_handling": "single-page-application"
+  }
 }

@@ -49,7 +49,7 @@ void loop() {
 
 const PROJECTS_KEY = "webArduinoIDE_projects";
 const AUTOSAVE_KEY = "webArduinoIDE_autosave_tabs";
-const LAYOUT_KEY = "webArduinoIDE_layout_sizes";
+const LAYOUT_KEY = "webArduinoIDE_layout_sizes_v3";
 const BACKEND_CONFIG_KEY = "webArduinoIDE_backend_config";
 const MAIN_FILE = "tempSketch.ino";
 const AUTOSAVE_DELAY_MS = 500;
@@ -61,17 +61,15 @@ const ALLOWED_FILE_EXTENSIONS = [".ino", ".cpp", ".c", ".h", ".hpp", ".txt"];
 const SERIAL_BAUD_RATES = [9600, 19200, 38400, 57600, 74880, 115200, 230400, 921600];
 const AI_STEPS = ["Thinking", "Writing code", "Installing libraries", "Compiling", "Ready"];
 const DEFAULT_LAYOUT_SIZES = {
-  left: 250,
-  right: 330,
-  dock: 264,
+  left: 238,
+  right: 294,
+  dock: 286,
 };
 const LOCAL_API_BASE = "http://localhost:5000";
 const getDefaultApiBase = () => {
   if (typeof window === "undefined") return LOCAL_API_BASE;
 
-  const localHosts = new Set(["localhost", "127.0.0.1", "::1"]);
-
-  if (window.location.protocol.startsWith("http") && !localHosts.has(window.location.hostname)) {
+  if (window.location.protocol.startsWith("http")) {
     return window.location.origin;
   }
 
@@ -220,6 +218,11 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
+function getMaxDockHeight(shellHeight) {
+  const usableHeight = Number(shellHeight) || 720;
+  return Math.max(180, Math.min(320, Math.floor(usableHeight * 0.38)));
+}
+
 function normalizeFiles(files) {
   const sourceFiles = Array.isArray(files) ? files : createDefaultFiles();
   const normalized = [];
@@ -286,7 +289,11 @@ function readStoredLayoutSizes() {
     return {
       left: clamp(Number(parsed.left) || DEFAULT_LAYOUT_SIZES.left, 180, 430),
       right: clamp(Number(parsed.right) || DEFAULT_LAYOUT_SIZES.right, 250, 540),
-      dock: clamp(Number(parsed.dock) || DEFAULT_LAYOUT_SIZES.dock, 180, 480),
+      dock: clamp(
+        Number(parsed.dock) || DEFAULT_LAYOUT_SIZES.dock,
+        180,
+        getMaxDockHeight(typeof window === "undefined" ? 720 : window.innerHeight)
+      ),
     };
   } catch {
     return DEFAULT_LAYOUT_SIZES;
@@ -839,10 +846,7 @@ function App() {
       }
 
       if (resizeState.panel === "dock") {
-        const maxDock = Math.max(
-          180,
-          Math.min(480, resizeState.shellHeight - 260)
-        );
+        const maxDock = getMaxDockHeight(resizeState.shellHeight);
 
         return {
           ...prev,
@@ -916,7 +920,7 @@ function App() {
         const left = clamp(prev.left, 180, maxLeft);
         const maxRight = Math.max(250, Math.min(540, mainWidth - left - 340));
         const right = clamp(prev.right, 250, maxRight);
-        const maxDock = Math.max(180, Math.min(480, shellHeight - 260));
+        const maxDock = getMaxDockHeight(shellHeight);
         const dock = clamp(prev.dock, 180, maxDock);
 
         if (left === prev.left && right === prev.right && dock === prev.dock) {
@@ -1686,6 +1690,7 @@ function App() {
 
   const selectedBoardName =
     availableBoards.find((board) => board.fqbn === selectedFqbn)?.name ||
+    (selectedFqbn === "esp32:esp32:esp32" ? "ESP32 Dev Module" : "") ||
     selectedFqbn;
 
   const backendHostLabel = useMemo(() => {
@@ -2083,21 +2088,14 @@ function App() {
                       <dt>Port</dt>
                       <dd>{selectedPort}</dd>
                     </div>
-                    <div>
-                      <dt>Backend</dt>
-                      <dd>{backendHostLabel}</dd>
-                    </div>
                   </dl>
                 </section>
 
-                <section className="tool-section">
-                  <div className="section-heading">
-                    <div>
-                      <p className="eyebrow">Connection</p>
-                      <h2>Backend URL</h2>
-                    </div>
-                  </div>
-
+                <details className="tool-section backend-advanced-section">
+                  <summary>
+                    <span>Backend URL</span>
+                    <small>{backendHostLabel}</small>
+                  </summary>
                   <div className="backend-settings">
                     <input
                       value={backendUrlDraft}
@@ -2112,7 +2110,7 @@ function App() {
                       <button onClick={resetBackendUrl}>Reset</button>
                     </div>
                   </div>
-                </section>
+                </details>
 
                 <section className="tool-section">
                   <div className="button-row">
